@@ -1,1242 +1,507 @@
---[[
-=========================================================
-              AXIOM DRIVING ASSIST
-=========================================================
-
-Dùng dưới dạng LocalScript:
-
-StarterPlayer
-└── StarterPlayerScripts
-    └── AxiomDrivingAssist.client.lua
-
-Hỗ trợ:
-✓ HUD tốc độ
-✓ Speed Limiter
-✓ Cruise Control
-✓ Auto Brake
-✓ Forward Collision Warning
-✓ Steering Assist
-✓ Parking Brake
-✓ UI ON/OFF
-✓ PC + Mobile-friendly UI
-
-Phím:
-RightShift = Ẩn / hiện UI
-P          = Park
-C          = Cruise
-=========================================================
-]]
-
----------------------------------------------------------
--- SERVICES
----------------------------------------------------------
+-- AXIOM DRIVING ASSIST UI V2
+-- LocalScript -> StarterPlayer/StarterPlayerScripts
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
+local UIS = game:GetService("UserInputService")
 
 local player = Players.LocalPlayer
-local playerGui = player:WaitForChild("PlayerGui")
+local pg = player:WaitForChild("PlayerGui")
 
----------------------------------------------------------
--- CONFIG
----------------------------------------------------------
-
-local Config = {
-
+local CFG = {
 	NormalSpeed = 65,
-
 	SpeedLimit = 50,
-
 	CruiseMinSpeed = 10,
-
-	ObstacleWarningDistance = 45,
-
-	AutoBrakeDistance = 20,
-
+	WarnDistance = 45,
+	BrakeDistance = 20,
 	RaycastHeight = 2.5,
-
-	SteeringAssistStrength = 0.12,
-
-	UIKey = Enum.KeyCode.RightShift,
-
+	SteerAssist = 0.12,
+	ToggleKey = Enum.KeyCode.RightShift,
 }
 
----------------------------------------------------------
--- FEATURES
----------------------------------------------------------
-
-local Features = {
-
-	SpeedLimiter = true,
-
+local F = {
+	Limiter = true,
 	Cruise = false,
-
 	AutoBrake = true,
-
-	CollisionWarning = true,
-
-	SteeringAssist = false,
-
-	ParkingBrake = false,
-
+	Warning = true,
+	SteerAssist = false,
+	Park = false,
 }
 
----------------------------------------------------------
--- STATE
----------------------------------------------------------
-
-local currentSeat = nil
-local currentVehicle = nil
-
+local seat, vehicle
 local cruiseSpeed = 0
-
-local obstacleDistance = math.huge
-
----------------------------------------------------------
--- VEHICLE
----------------------------------------------------------
+local obstacle = math.huge
 
 local function getSeat()
-
-	local character = player.Character
-
-	if not character then
-		return nil
-	end
-
-	local humanoid =
-		character:FindFirstChildOfClass(
-			"Humanoid"
-		)
-
-	if not humanoid then
-		return nil
-	end
-
-	local seat =
-		humanoid.SeatPart
-
-	if seat
-		and seat:IsA("VehicleSeat")
-	then
-
-		return seat
-
-	end
-
-	return nil
-
+	local c = player.Character
+	local h = c and c:FindFirstChildOfClass("Humanoid")
+	local s = h and h.SeatPart
+	return s and s:IsA("VehicleSeat") and s or nil
 end
 
-local function findVehicle(seat)
+local function getVehicle(s)
+	if not s then return nil end
+	local p = s
+	while p and p ~= workspace do
+		if p:IsA("Model") and p:FindFirstChildWhichIsA("VehicleSeat", true) == s then
+			return p
+		end
+		p = p.Parent
+	end
+	return s.Parent
+end
+
+local function speed()
+	return seat and seat.AssemblyLinearVelocity.Magnitude or 0
+end
+
+local function kmh(v)
+	return math.floor(v * 1.008 + 0.5)
+end
+
+local function park(on)
+	if not seat then return end
+	F.Park = on
+	if on then
+		F.Cruise = false
+		cruiseSpeed = 0
+		seat.MaxSpeed = 0
+		if speed() < 4 then
+			seat.AssemblyLinearVelocity = Vector3.zero
+			seat.AssemblyAngularVelocity = Vector3.zero
+		end
+	else
+		seat.MaxSpeed = CFG.NormalSpeed
+	end
+end
+
+local function cruise()
+	if not seat or F.Park then return end
+	if F.Cruise then
+		F.Cruise = false
+		cruiseSpeed = 0
+		return
+	end
+	local v = speed()
+	if v >= CFG.CruiseMinSpeed then
+		F.Cruise = true
+		cruiseSpeed = v
+	end
+end
+
+local rp = RaycastParams.new()
+rp.FilterType = Enum.RaycastFilterType.Exclude
+
+local function scan()
+	if not seat then obstacle = math.huge return end
+	local ignore = {}
+	if vehicle then table.insert(ignore, vehicle) end
+	if player.Character then table.insert(ignore, player.Character) end
+	rp.FilterDescendantsInstances = ignore
+
+	local origin = seat.Position + Vector3.new(0, CFG.RaycastHeight, 0)
+	local hit = workspace:Raycast(origin, seat.CFrame.LookVector * CFG.WarnDistance, rp)
+	obstacle = hit and (hit.Position - origin).Magnitude or math.huge
+end
+
+local function autoBrake()
+	if not seat or not F.AutoBrake or F.Park or obstacle > CFG.BrakeDistance then return end
+	if speed() <= 1 then return end
+	F.Cruise = false
+	cruiseSpeed = 0
+	local factor = math.clamp(obstacle / CFG.BrakeDistance, 0.15, 1)
+	seat.AssemblyLinearVelocity *= (0.72 + factor * 0.18)
+end
+
+local function steerAssist()
+	if not seat or not F.SteerAssist or speed() < 5 then return end
+	if math.abs(seat.SteerFloat) < 0.1 then
+		local a = seat.AssemblyAngularVelocity
+		seat.AssemblyAngularVelocity = Vector3.new(a.X, a.Y * (1 - CFG.SteerAssist), a.Z)
+	end
+end
+
+-- UI
+local old = pg:FindFirstChild("AxiomDriveV2")
+if old then old:Destroy() end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "AxiomDriveV2"
+gui.ResetOnSpawn = false
+gui.DisplayOrder = 9999
+gui.Parent = pg
+
+local main = Instance.new("Frame")
+main.AnchorPoint = Vector2.new(0, .5)
+main.Position = UDim2.new(0, 18, .5, 0)
+main.Size = UDim2.fromOffset(390, 520)
+main.BackgroundColor3 = Color3.fromRGB(13,15,20)
+main.BorderSizePixel = 0
+main.Parent = gui
+Instance.new("UICorner", main).CornerRadius = UDim.new(0,18)
+
+local stroke = Instance.new("UIStroke", main)
+stroke.Color = Color3.fromRGB(68,78,94)
+stroke.Transparency = .3
+
+local header = Instance.new("Frame")
+header.Size = UDim2.new(1,0,0,64)
+header.BackgroundTransparency = 1
+header.Active = true
+header.Parent = main
+
+local title = Instance.new("TextLabel")
+title.Position = UDim2.fromOffset(18,10)
+title.Size = UDim2.new(1,-80,0,25)
+title.BackgroundTransparency = 1
+title.Text = "AXIOM DRIVING ASSIST"
+title.Font = Enum.Font.GothamBold
+title.TextSize = 17
+title.TextColor3 = Color3.new(1,1,1)
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = header
+
+local sub = Instance.new("TextLabel")
+sub.Position = UDim2.fromOffset(18,35)
+sub.Size = UDim2.new(1,-80,0,16)
+sub.BackgroundTransparency = 1
+sub.Text = "SYSTEM • ONLINE"
+sub.Font = Enum.Font.GothamMedium
+sub.TextSize = 11
+sub.TextColor3 = Color3.fromRGB(85,235,140)
+sub.TextXAlignment = Enum.TextXAlignment.Left
+sub.Parent = header
+
+local min = Instance.new("TextButton")
+min.Position = UDim2.new(1,-50,0,13)
+min.Size = UDim2.fromOffset(34,34)
+min.BackgroundColor3 = Color3.fromRGB(29,33,42)
+min.Text = "—"
+min.TextColor3 = Color3.new(1,1,1)
+min.Font = Enum.Font.GothamBold
+min.TextSize = 18
+min.BorderSizePixel = 0
+min.Parent = header
+Instance.new("UICorner", min).CornerRadius = UDim.new(0,9)
+
+local tabs = Instance.new("Frame")
+tabs.Position = UDim2.fromOffset(16,68)
+tabs.Size = UDim2.new(1,-32,0,42)
+tabs.BackgroundColor3 = Color3.fromRGB(20,23,30)
+tabs.BorderSizePixel = 0
+tabs.Parent = main
+Instance.new("UICorner", tabs).CornerRadius = UDim.new(0,11)
+
+local function tabButton(text, pos)
+	local b = Instance.new("TextButton")
+	b.Position = pos
+	b.Size = UDim2.new(.5,-6,1,-8)
+	b.BackgroundColor3 = Color3.fromRGB(28,31,40)
+	b.BorderSizePixel = 0
+	b.Text = text
+	b.TextColor3 = Color3.new(1,1,1)
+	b.Font = Enum.Font.GothamBold
+	b.TextSize = 12
+	b.Parent = tabs
+	Instance.new("UICorner", b).CornerRadius = UDim.new(0,8)
+	return b
+end
+
+local tabStatus = tabButton("TRẠNG THÁI", UDim2.fromOffset(4,4))
+local tabAssist = tabButton("HỖ TRỢ", UDim2.new(.5,2,0,4))
+
+local statusPage = Instance.new("Frame")
+statusPage.Position = UDim2.fromOffset(16,122)
+statusPage.Size = UDim2.new(1,-32,1,-140)
+statusPage.BackgroundTransparency = 1
+statusPage.Parent = main
+
+local assistPage = Instance.new("ScrollingFrame")
+assistPage.Position = statusPage.Position
+assistPage.Size = statusPage.Size
+assistPage.BackgroundTransparency = 1
+assistPage.BorderSizePixel = 0
+assistPage.ScrollBarThickness = 4
+assistPage.AutomaticCanvasSize = Enum.AutomaticSize.Y
+assistPage.CanvasSize = UDim2.new()
+assistPage.Visible = false
+assistPage.Parent = main
+local list = Instance.new("UIListLayout", assistPage)
+list.Padding = UDim.new(0,8)
+
+-- Speed card
+local speedCard = Instance.new("Frame")
+speedCard.Size = UDim2.new(1,0,0,150)
+speedCard.BackgroundColor3 = Color3.fromRGB(20,23,30)
+speedCard.BorderSizePixel = 0
+speedCard.Parent = statusPage
+Instance.new("UICorner", speedCard).CornerRadius = UDim.new(0,14)
+
+local speedText = Instance.new("TextLabel")
+speedText.Position = UDim2.fromOffset(20,15)
+speedText.Size = UDim2.fromOffset(170,70)
+speedText.BackgroundTransparency = 1
+speedText.Text = "0"
+speedText.Font = Enum.Font.GothamBlack
+speedText.TextSize = 56
+speedText.TextColor3 = Color3.new(1,1,1)
+speedText.TextXAlignment = Enum.TextXAlignment.Left
+speedText.Parent = speedCard
+
+local unit = Instance.new("TextLabel")
+unit.Position = UDim2.fromOffset(24,82)
+unit.Size = UDim2.fromOffset(90,20)
+unit.BackgroundTransparency = 1
+unit.Text = "KM/H"
+unit.Font = Enum.Font.GothamMedium
+unit.TextSize = 13
+unit.TextColor3 = Color3.fromRGB(155,165,180)
+unit.TextXAlignment = Enum.TextXAlignment.Left
+unit.Parent = speedCard
+
+local gear = Instance.new("TextLabel")
+gear.Position = UDim2.new(1,-84,0,20)
+gear.Size = UDim2.fromOffset(60,60)
+gear.BackgroundColor3 = Color3.fromRGB(35,78,52)
+gear.Text = "D"
+gear.TextColor3 = Color3.new(1,1,1)
+gear.Font = Enum.Font.GothamBlack
+gear.TextSize = 28
+gear.BorderSizePixel = 0
+gear.Parent = speedCard
+Instance.new("UICorner", gear).CornerRadius = UDim.new(0,14)
+
+local busName = Instance.new("TextLabel")
+busName.Position = UDim2.fromOffset(20,112)
+busName.Size = UDim2.new(1,-40,0,20)
+busName.BackgroundTransparency = 1
+busName.Text = "BUS: WAITING"
+busName.Font = Enum.Font.GothamMedium
+busName.TextSize = 12
+busName.TextColor3 = Color3.fromRGB(185,195,210)
+busName.TextXAlignment = Enum.TextXAlignment.Left
+busName.Parent = speedCard
+
+-- Warning card
+local warnCard = Instance.new("Frame")
+warnCard.Position = UDim2.fromOffset(0,164)
+warnCard.Size = UDim2.new(1,0,0,82)
+warnCard.BackgroundColor3 = Color3.fromRGB(22,25,32)
+warnCard.BorderSizePixel = 0
+warnCard.Parent = statusPage
+Instance.new("UICorner", warnCard).CornerRadius = UDim.new(0,14)
+
+local warnTitle = Instance.new("TextLabel")
+warnTitle.Position = UDim2.fromOffset(16,12)
+warnTitle.Size = UDim2.new(1,-32,0,22)
+warnTitle.BackgroundTransparency = 1
+warnTitle.Text = "PHÍA TRƯỚC AN TOÀN"
+warnTitle.Font = Enum.Font.GothamBold
+warnTitle.TextSize = 13
+warnTitle.TextColor3 = Color3.fromRGB(100,235,150)
+warnTitle.TextXAlignment = Enum.TextXAlignment.Left
+warnTitle.Parent = warnCard
+
+local warnInfo = Instance.new("TextLabel")
+warnInfo.Position = UDim2.fromOffset(16,40)
+warnInfo.Size = UDim2.new(1,-32,0,22)
+warnInfo.BackgroundTransparency = 1
+warnInfo.Text = "Khoảng cách vật cản: ---"
+warnInfo.Font = Enum.Font.Gotham
+warnInfo.TextSize = 12
+warnInfo.TextColor3 = Color3.fromRGB(185,195,210)
+warnInfo.TextXAlignment = Enum.TextXAlignment.Left
+warnInfo.Parent = warnCard
+
+-- Info card
+local info = Instance.new("TextLabel")
+info.Position = UDim2.fromOffset(0,260)
+info.Size = UDim2.new(1,0,0,126)
+info.BackgroundColor3 = Color3.fromRGB(20,23,30)
+info.BorderSizePixel = 0
+info.Text = ""
+info.Font = Enum.Font.Code
+info.TextSize = 13
+info.TextColor3 = Color3.fromRGB(195,205,215)
+info.TextXAlignment = Enum.TextXAlignment.Left
+info.TextYAlignment = Enum.TextYAlignment.Top
+info.Parent = statusPage
+Instance.new("UICorner", info).CornerRadius = UDim.new(0,14)
+
+local btns = {}
+local function addToggle(label, key)
+	local b = Instance.new("TextButton")
+	b.Size = UDim2.new(1,-5,0,50)
+	b.BackgroundColor3 = Color3.fromRGB(28,31,40)
+	b.BorderSizePixel = 0
+	b.TextColor3 = Color3.new(1,1,1)
+	b.Font = Enum.Font.GothamMedium
+	b.TextSize = 13
+	b.Parent = assistPage
+	Instance.new("UICorner", b).CornerRadius = UDim.new(0,11)
+	btns[key] = {b=b,label=label}
+
+	b.MouseButton1Click:Connect(function()
+		if key == "Cruise" then cruise() else F[key] = not F[key] end
+	end)
+end
+
+addToggle("Giới hạn tốc độ", "Limiter")
+addToggle("Giữ ga Cruise", "Cruise")
+addToggle("Tự động phanh", "AutoBrake")
+addToggle("Cảnh báo vật cản", "Warning")
+addToggle("Hỗ trợ giữ hướng", "SteerAssist")
+
+local parkBtn = Instance.new("TextButton")
+parkBtn.Size = UDim2.new(1,-5,0,54)
+parkBtn.BackgroundColor3 = Color3.fromRGB(60,47,30)
+parkBtn.BorderSizePixel = 0
+parkBtn.Text = "PARK / RELEASE P"
+parkBtn.TextColor3 = Color3.new(1,1,1)
+parkBtn.Font = Enum.Font.GothamBold
+parkBtn.TextSize = 14
+parkBtn.Parent = assistPage
+Instance.new("UICorner", parkBtn).CornerRadius = UDim.new(0,11)
+
+parkBtn.MouseButton1Click:Connect(function()
+	if not seat then return end
+	if F.Park then park(false) elseif speed() <= 3 then park(true) end
+end)
+
+local function refreshButtons()
+	for k,d in pairs(btns) do
+		local on = F[k]
+		d.b.Text = d.label .. "                         " .. (on and "ON" or "OFF")
+		d.b.BackgroundColor3 = on and Color3.fromRGB(35,78,52) or Color3.fromRGB(28,31,40)
+	end
+end
+
+local page = "status"
+local function switchPage(which)
+	page = which
+	statusPage.Visible = which == "status"
+	assistPage.Visible = which == "assist"
+	tabStatus.BackgroundColor3 = which == "status" and Color3.fromRGB(35,78,52) or Color3.fromRGB(28,31,40)
+	tabAssist.BackgroundColor3 = which == "assist" and Color3.fromRGB(35,78,52) or Color3.fromRGB(28,31,40)
+end
+tabStatus.MouseButton1Click:Connect(function() switchPage("status") end)
+tabAssist.MouseButton1Click:Connect(function() switchPage("assist") end)
+switchPage("status")
+
+-- minimize
+local minimized = false
+min.MouseButton1Click:Connect(function()
+	minimized = not minimized
+	main.Size = minimized and UDim2.fromOffset(390,64) or UDim2.fromOffset(390,520)
+	tabs.Visible = not minimized
+	if minimized then statusPage.Visible=false assistPage.Visible=false else switchPage(page) end
+end)
+
+-- drag
+local dragging, dragStart, startPos = false, nil, nil
+header.InputBegan:Connect(function(i)
+	if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+		dragging=true dragStart=i.Position startPos=main.Position
+	end
+end)
+UIS.InputChanged:Connect(function(i)
+	if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+		local d=i.Position-dragStart
+		main.Position=UDim2.new(startPos.X.Scale,startPos.X.Offset+d.X,startPos.Y.Scale,startPos.Y.Offset+d.Y)
+	end
+end)
+UIS.InputEnded:Connect(function(i)
+	if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then dragging=false end
+end)
+
+UIS.InputBegan:Connect(function(i,p)
+	if p then return end
+	if i.KeyCode == CFG.ToggleKey then
+		gui.Enabled = not gui.Enabled
+	elseif i.KeyCode == Enum.KeyCode.P then
+		if seat then
+			if F.Park then park(false) elseif speed() <= 3 then park(true) end
+		end
+	elseif i.KeyCode == Enum.KeyCode.C then
+		cruise()
+	end
+end)
+
+RunService.RenderStepped:Connect(function(dt)
+	local s = getSeat()
+	if s ~= seat then
+		seat = s
+		vehicle = getVehicle(s)
+		F.Cruise = false
+		F.Park = false
+		cruiseSpeed = 0
+	end
 
 	if not seat then
-		return nil
-	end
-
-	local object =
-		seat
-
-	while object
-		and object ~= workspace
-	do
-
-		if object:IsA("Model") then
-
-			local vehicleSeat =
-				object:FindFirstChildWhichIsA(
-					"VehicleSeat",
-					true
-				)
-
-			if vehicleSeat == seat then
-				return object
-			end
-
-		end
-
-		object =
-			object.Parent
-
-	end
-
-	return seat.Parent
-
-end
-
----------------------------------------------------------
--- SPEED
----------------------------------------------------------
-
-local function getSpeed()
-
-	if not currentSeat then
-		return 0
-	end
-
-	return
-		currentSeat
-			.AssemblyLinearVelocity
-			.Magnitude
-
-end
-
-local function toKMH(speed)
-
-	return math.floor(
-		speed * 1.008 + 0.5
-	)
-
-end
-
----------------------------------------------------------
--- PARK
----------------------------------------------------------
-
-local function setParkingBrake(enabled)
-
-	if not currentSeat then
+		speedText.Text = "0"
+		gear.Text = "-"
+		busName.Text = "BUS: WAITING"
+		warnTitle.Text = "CHƯA KẾT NỐI XE"
+		warnTitle.TextColor3 = Color3.fromRGB(180,190,205)
+		warnInfo.Text = "Ngồi vào VehicleSeat để kích hoạt."
+		info.Text = "\n  PARK       : OFF\n  CRUISE     : OFF\n  LIMITER    : "..(F.Limiter and "ON" or "OFF").."\n  AUTO BRAKE : "..(F.AutoBrake and "ON" or "OFF")
+		refreshButtons()
 		return
 	end
 
-	Features.ParkingBrake =
-		enabled
+	local v = speed()
+	scan()
 
-	if enabled then
-
-		Features.Cruise =
-			false
-
-		cruiseSpeed =
-			0
-
-		currentSeat.MaxSpeed =
-			0
-
-		if getSpeed() < 4 then
-
-			currentSeat.AssemblyLinearVelocity =
-				Vector3.zero
-
-			currentSeat.AssemblyAngularVelocity =
-				Vector3.zero
-
-		end
-
+	if F.Park then
+		seat.MaxSpeed = 0
+		if v < 3 then seat.AssemblyLinearVelocity = Vector3.zero end
+	elseif F.Limiter then
+		seat.MaxSpeed = CFG.SpeedLimit
 	else
-
-		currentSeat.MaxSpeed =
-			Config.NormalSpeed
-
+		seat.MaxSpeed = CFG.NormalSpeed
 	end
 
-end
-
----------------------------------------------------------
--- CRUISE
----------------------------------------------------------
-
-local function toggleCruise()
-
-	if not currentSeat then
-		return
+	if F.Cruise and cruiseSpeed > 0 and not F.Park and v < cruiseSpeed then
+		local diff = cruiseSpeed - v
+		seat.AssemblyLinearVelocity += seat.CFrame.LookVector * diff * dt * 2
 	end
 
-	if Features.ParkingBrake then
-		return
+	autoBrake()
+	steerAssist()
+
+	speedText.Text = tostring(kmh(v))
+	gear.Text = F.Park and "P" or "D"
+	gear.BackgroundColor3 = F.Park and Color3.fromRGB(115,45,45) or Color3.fromRGB(35,78,52)
+	busName.Text = "BUS: "..(vehicle and vehicle.Name or "VEHICLE")
+
+	if not F.Warning then
+		warnTitle.Text = "CẢNH BÁO ĐÃ TẮT"
+		warnTitle.TextColor3 = Color3.fromRGB(160,170,185)
+	elseif obstacle < CFG.BrakeDistance then
+		warnTitle.Text = "PHANH • VẬT CẢN RẤT GẦN"
+		warnTitle.TextColor3 = Color3.fromRGB(255,95,95)
+	elseif obstacle < CFG.WarnDistance then
+		warnTitle.Text = "CẢNH BÁO VẬT CẢN"
+		warnTitle.TextColor3 = Color3.fromRGB(255,195,90)
+	else
+		warnTitle.Text = "PHÍA TRƯỚC AN TOÀN"
+		warnTitle.TextColor3 = Color3.fromRGB(100,235,150)
 	end
 
-	if Features.Cruise then
-
-		Features.Cruise = false
-		cruiseSpeed = 0
-
-		return
-
-	end
-
-	local speed =
-		getSpeed()
-
-	if speed <
-		Config.CruiseMinSpeed
-	then
-
-		return
-
-	end
-
-	Features.Cruise = true
-
-	cruiseSpeed = speed
-
-end
-
----------------------------------------------------------
--- OBSTACLE RAYCAST
----------------------------------------------------------
-
-local rayParams =
-	RaycastParams.new()
-
-rayParams.FilterType =
-	Enum.RaycastFilterType.Exclude
-
-local function checkObstacle()
-
-	if not currentSeat then
-
-		obstacleDistance =
-			math.huge
-
-		return nil
-
-	end
-
-	local ignore = {}
-
-	if currentVehicle then
-		table.insert(
-			ignore,
-			currentVehicle
-		)
-	end
-
-	if player.Character then
-		table.insert(
-			ignore,
-			player.Character
-		)
-	end
-
-	rayParams.FilterDescendantsInstances =
-		ignore
-
-	local origin =
-		currentSeat.Position
-		+ Vector3.new(
-			0,
-			Config.RaycastHeight,
-			0
-		)
-
-	local direction =
-		currentSeat.CFrame.LookVector
-		* Config.ObstacleWarningDistance
-
-	local result =
-		workspace:Raycast(
-			origin,
-			direction,
-			rayParams
-		)
-
-	if result then
-
-		obstacleDistance =
-			(
-				result.Position
-				- origin
-			).Magnitude
-
-		return result
-
-	end
-
-	obstacleDistance =
-		math.huge
-
-	return nil
-
-end
-
----------------------------------------------------------
--- AUTO BRAKE
----------------------------------------------------------
-
-local function applyAutoBrake()
-
-	if not Features.AutoBrake then
-		return
-	end
-
-	if not currentSeat then
-		return
-	end
-
-	if Features.ParkingBrake then
-		return
-	end
-
-	if obstacleDistance >
-		Config.AutoBrakeDistance
-	then
-
-		return
-
-	end
-
-	local speed =
-		getSpeed()
-
-	if speed <= 1 then
-		return
-	end
-
-	Features.Cruise =
-		false
-
-	cruiseSpeed =
-		0
-
-	local velocity =
-		currentSeat
-			.AssemblyLinearVelocity
-
-	local distanceFactor =
-		math.clamp(
-			obstacleDistance
-				/ Config.AutoBrakeDistance,
-			0.15,
-			1
-		)
-
-	currentSeat.AssemblyLinearVelocity =
-		velocity
-		* (
-			0.72
-			+ distanceFactor
-			* 0.18
-		)
-
-end
-
----------------------------------------------------------
--- STEERING ASSIST
----------------------------------------------------------
-
-local function applySteeringAssist()
-
-	if not Features.SteeringAssist then
-		return
-	end
-
-	if not currentSeat then
-		return
-	end
-
-	if getSpeed() < 5 then
-		return
-	end
-
-	-- Giảm rung/yaw nhẹ khi xe đang chạy thẳng.
-	if math.abs(
-		currentSeat.SteerFloat
-	) < 0.1
-	then
-
-		local angular =
-			currentSeat
-				.AssemblyAngularVelocity
-
-		currentSeat.AssemblyAngularVelocity =
-			Vector3.new(
-				angular.X,
-				angular.Y
-					* (
-						1
-						- Config.SteeringAssistStrength
-					),
-				angular.Z
-			)
-
-	end
-
-end
-
----------------------------------------------------------
--- UI
----------------------------------------------------------
-
-local old =
-	playerGui:FindFirstChild(
-		"AxiomDrivingAssist"
-	)
-
-if old then
-	old:Destroy()
-end
-
-local gui =
-	Instance.new("ScreenGui")
-
-gui.Name =
-	"AxiomDrivingAssist"
-
-gui.ResetOnSpawn =
-	false
-
-gui.DisplayOrder =
-	9999
-
-gui.Parent =
-	playerGui
-
----------------------------------------------------------
--- MAIN
----------------------------------------------------------
-
-local main =
-	Instance.new("Frame")
-
-main.Size =
-	UDim2.fromOffset(
-		340,
-		445
-	)
-
-main.Position =
-	UDim2.new(
-		0,
-		25,
-		0.5,
-		-220
-	)
-
-main.BackgroundColor3 =
-	Color3.fromRGB(
-		15,
-		17,
-		22
-	)
-
-main.BorderSizePixel =
-	0
-
-main.Parent =
-	gui
-
-local mainCorner =
-	Instance.new("UICorner")
-
-mainCorner.CornerRadius =
-	UDim.new(
-		0,
-		16
-	)
-
-mainCorner.Parent =
-	main
-
-local stroke =
-	Instance.new("UIStroke")
-
-stroke.Color =
-	Color3.fromRGB(
-		65,
-		75,
-		90
-	)
-
-stroke.Parent =
-	main
-
----------------------------------------------------------
--- TITLE
----------------------------------------------------------
-
-local title =
-	Instance.new("TextLabel")
-
-title.Position =
-	UDim2.fromOffset(
-		16,
-		10
-	)
-
-title.Size =
-	UDim2.new(
-		1,
-		-32,
-		0,
-		25
-	)
-
-title.BackgroundTransparency =
-	1
-
-title.Text =
-	"AXIOM DRIVING ASSIST"
-
-title.Font =
-	Enum.Font.GothamBold
-
-title.TextSize =
-	17
-
-title.TextColor3 =
-	Color3.new(
-		1,
-		1,
-		1
-	)
-
-title.TextXAlignment =
-	Enum.TextXAlignment.Left
-
-title.Parent =
-	main
-
----------------------------------------------------------
-
-local system =
-	Instance.new("TextLabel")
-
-system.Position =
-	UDim2.fromOffset(
-		16,
-		35
-	)
-
-system.Size =
-	UDim2.new(
-		1,
-		-32,
-		0,
-		18
-	)
-
-system.BackgroundTransparency =
-	1
-
-system.Text =
-	"SYSTEM • ONLINE"
-
-system.Font =
-	Enum.Font.GothamMedium
-
-system.TextSize =
-	11
-
-system.TextColor3 =
-	Color3.fromRGB(
-		80,
-		235,
-		140
-	)
-
-system.TextXAlignment =
-	Enum.TextXAlignment.Left
-
-system.Parent =
-	main
-
----------------------------------------------------------
--- STATUS
----------------------------------------------------------
-
-local status =
-	Instance.new("TextLabel")
-
-status.Position =
-	UDim2.fromOffset(
-		16,
-		65
-	)
-
-status.Size =
-	UDim2.new(
-		1,
-		-32,
-		0,
-		110
-	)
-
-status.BackgroundColor3 =
-	Color3.fromRGB(
-		22,
-		25,
-		32
-	)
-
-status.BorderSizePixel =
-	0
-
-status.Font =
-	Enum.Font.Code
-
-status.TextSize =
-	12
-
-status.TextColor3 =
-	Color3.fromRGB(
-		200,
-		210,
-		220
-	)
-
-status.TextXAlignment =
-	Enum.TextXAlignment.Left
-
-status.TextYAlignment =
-	Enum.TextYAlignment.Top
-
-status.Parent =
-	main
-
-local statusCorner =
-	Instance.new("UICorner")
-
-statusCorner.CornerRadius =
-	UDim.new(
-		0,
-		10
-	)
-
-statusCorner.Parent =
-	status
-
----------------------------------------------------------
--- BUTTON AREA
----------------------------------------------------------
-
-local list =
-	Instance.new("Frame")
-
-list.Position =
-	UDim2.fromOffset(
-		16,
-		188
-	)
-
-list.Size =
-	UDim2.new(
-		1,
-		-32,
-		0,
-		240
-	)
-
-list.BackgroundTransparency =
-	1
-
-list.Parent =
-	main
-
-local layout =
-	Instance.new("UIListLayout")
-
-layout.Padding =
-	UDim.new(
-		0,
-		7
-	)
-
-layout.Parent =
-	list
-
----------------------------------------------------------
--- TOGGLE FACTORY
----------------------------------------------------------
-
-local buttons = {}
-
-local function createToggle(
-	label,
-	feature
-)
-
-	local button =
-		Instance.new("TextButton")
-
-	button.Size =
-		UDim2.new(
-			1,
-			0,
-			0,
-			38
-		)
-
-	button.BorderSizePixel =
-		0
-
-	button.Font =
-		Enum.Font.GothamMedium
-
-	button.TextSize =
-		13
-
-	button.TextColor3 =
-		Color3.new(
-			1,
-			1,
-			1
-		)
-
-	button.Parent =
-		list
-
-	buttons[feature] =
-		{
-			Button = button,
-			Label = label,
-		}
-
-	local corner =
-		Instance.new("UICorner")
-
-	corner.CornerRadius =
-		UDim.new(
-			0,
-			10
-		)
-
-	corner.Parent =
-		button
-
-	local function refresh()
-
-		local enabled =
-			Features[feature]
-
-		button.Text =
-			label
-			.. "      "
-			.. (
-				enabled
-				and "[ ON ]"
-				or "[ OFF ]"
-			)
-
-		button.BackgroundColor3 =
-			enabled
-				and Color3.fromRGB(
-					35,
-					78,
-					52
-				)
-				or Color3.fromRGB(
-					29,
-					32,
-					41
-				)
-
-	end
-
-	button.MouseButton1Click:Connect(
-		function()
-
-			if feature ==
-				"Cruise"
-			then
-
-				toggleCruise()
-
-			else
-
-				Features[feature] =
-					not Features[feature]
-
-			end
-
-			refresh()
-
-		end
-	)
-
-	refresh()
-
-end
-
----------------------------------------------------------
--- BUTTONS
----------------------------------------------------------
-
-createToggle(
-	"Speed Limiter",
-	"SpeedLimiter"
-)
-
-createToggle(
-	"Cruise Control",
-	"Cruise"
-)
-
-createToggle(
-	"Auto Brake",
-	"AutoBrake"
-)
-
-createToggle(
-	"Collision Warning",
-	"CollisionWarning"
-)
-
-createToggle(
-	"Steering Assist",
-	"SteeringAssist"
-)
-
----------------------------------------------------------
--- PARK BUTTON
----------------------------------------------------------
-
-local parkButton =
-	Instance.new("TextButton")
-
-parkButton.Size =
-	UDim2.new(
-		1,
-		0,
-		0,
-		38
-	)
-
-parkButton.Text =
-	"PARK / RELEASE P"
-
-parkButton.Font =
-	Enum.Font.GothamBold
-
-parkButton.TextSize =
-	13
-
-parkButton.TextColor3 =
-	Color3.new(
-		1,
-		1,
-		1
-	)
-
-parkButton.BackgroundColor3 =
-	Color3.fromRGB(
-		58,
-		46,
-		30
-	)
-
-parkButton.BorderSizePixel =
-	0
-
-parkButton.Parent =
-	list
-
-local parkCorner =
-	Instance.new("UICorner")
-
-parkCorner.CornerRadius =
-	UDim.new(
-		0,
-		10
-	)
-
-parkCorner.Parent =
-	parkButton
-
-parkButton.MouseButton1Click:Connect(
-	function()
-
-		if not currentSeat then
-			return
-		end
-
-		if Features.ParkingBrake then
-
-			setParkingBrake(
-				false
-			)
-
-		else
-
-			if getSpeed() <= 3 then
-
-				setParkingBrake(
-					true
-				)
-
-			end
-
-		end
-
-	end
-)
-
----------------------------------------------------------
--- KEYBOARD
----------------------------------------------------------
-
-UserInputService.InputBegan:Connect(
-	function(
-		input,
-		processed
-	)
-
-		if processed then
-			return
-		end
-
-		if input.KeyCode ==
-			Config.UIKey
-		then
-
-			gui.Enabled =
-				not gui.Enabled
-
-		elseif input.KeyCode ==
-			Enum.KeyCode.P
-		then
-
-			if currentSeat then
-
-				if Features.ParkingBrake then
-
-					setParkingBrake(
-						false
-					)
-
-				elseif getSpeed() <= 3 then
-
-					setParkingBrake(
-						true
-					)
-
-				end
-
-			end
-
-		elseif input.KeyCode ==
-			Enum.KeyCode.C
-		then
-
-			toggleCruise()
-
-		end
-
-	end
-)
-
----------------------------------------------------------
--- MAIN LOOP
----------------------------------------------------------
-
-RunService.RenderStepped:Connect(
-	function(dt)
-
-		-----------------------------------------------------
-		-- VEHICLE
-		-----------------------------------------------------
-
-		local seat =
-			getSeat()
-
-		if seat ~= currentSeat then
-
-			currentSeat =
-				seat
-
-			currentVehicle =
-				findVehicle(
-					seat
-				)
-
-			Features.Cruise =
-				false
-
-			Features.ParkingBrake =
-				false
-
-			cruiseSpeed =
-				0
-
-		end
-
-		-----------------------------------------------------
-		-- WAITING
-		-----------------------------------------------------
-
-		if not currentSeat then
-
-			status.Text =
-				"BUS       : WAITING"
-				.. "\nSPEED     : 0 KM/H"
-				.. "\nPARK      : OFF"
-				.. "\nOBSTACLE  : ---"
-
-			return
-
-		end
-
-		local speed =
-			getSpeed()
-
-		-----------------------------------------------------
-		-- RAYCAST
-		-----------------------------------------------------
-
-		checkObstacle()
-
-		-----------------------------------------------------
-		-- PARK
-		-----------------------------------------------------
-
-		if Features.ParkingBrake then
-
-			currentSeat.MaxSpeed =
-				0
-
-			if speed < 3 then
-
-				currentSeat.AssemblyLinearVelocity =
-					Vector3.zero
-
-			end
-
-		-----------------------------------------------------
-		-- SPEED LIMITER
-		-----------------------------------------------------
-
-		elseif Features.SpeedLimiter then
-
-			currentSeat.MaxSpeed =
-				Config.SpeedLimit
-
-		else
-
-			currentSeat.MaxSpeed =
-				Config.NormalSpeed
-
-		end
-
-		-----------------------------------------------------
-		-- CRUISE
-		-----------------------------------------------------
-
-		if Features.Cruise
-			and cruiseSpeed > 0
-			and not Features.ParkingBrake
-		then
-
-			if speed <
-				cruiseSpeed
-			then
-
-				local forward =
-					currentSeat
-						.CFrame
-						.LookVector
-
-				local difference =
-					cruiseSpeed
-					- speed
-
-				currentSeat.AssemblyLinearVelocity =
-					currentSeat
-						.AssemblyLinearVelocity
-					+ forward
-					* difference
-					* dt
-					* 2
-
-			end
-
-		end
-
-		-----------------------------------------------------
-		-- AUTO BRAKE
-		-----------------------------------------------------
-
-		applyAutoBrake()
-
-		-----------------------------------------------------
-		-- STEERING
-		-----------------------------------------------------
-
-		applySteeringAssist()
-
-		-----------------------------------------------------
-		-- STATUS
-		-----------------------------------------------------
-
-		local warning =
-			"SAFE"
-
-		if obstacleDistance <
-			Config.AutoBrakeDistance
-		then
-
-			warning =
-				"BRAKE"
-
-		elseif obstacleDistance <
-			Config.ObstacleWarningDistance
-		then
-
-			warning =
-				"WARNING"
-
-		end
-
-		status.Text =
-			"BUS       : "
-			.. (
-				currentVehicle
-				and currentVehicle.Name
-				or "VEHICLE"
-			)
-			.. "\nSPEED     : "
-			.. toKMH(speed)
-			.. " KM/H"
-			.. "\nPARK      : "
-			.. (
-				Features.ParkingBrake
-					and "ON"
-					or "OFF"
-			)
-			.. "\nCRUISE    : "
-			.. (
-				Features.Cruise
-					and toKMH(
-						cruiseSpeed
-					)
-						.. " KM/H"
-					or "OFF"
-			)
-			.. "\nOBSTACLE  : "
-			.. (
-				obstacleDistance <
-					math.huge
-					and math.floor(
-						obstacleDistance
-					)
-						.. " m"
-					or "---"
-			)
-			.. "\nASSIST    : "
-			.. warning
-
-	end
-)
-
----------------------------------------------------------
--- RESET
----------------------------------------------------------
-
-player.CharacterAdded:Connect(
-	function()
-
-		currentSeat =
-			nil
-
-		currentVehicle =
-			nil
-
-		cruiseSpeed =
-			0
-
-	end
-)
-
-print(
-	"[AXIOM DRIVING ASSIST] ONLINE"
-)
+	warnInfo.Text = "Khoảng cách vật cản: "..(obstacle < math.huge and math.floor(obstacle).." studs" or "---")
+
+	info.Text =
+		"\n  PARK       : "..(F.Park and "ON" or "OFF")..
+		"\n  CRUISE     : "..(F.Cruise and kmh(cruiseSpeed).." KM/H" or "OFF")..
+		"\n  LIMITER    : "..(F.Limiter and "ON" or "OFF")..
+		"\n  AUTO BRAKE : "..(F.AutoBrake and "ON" or "OFF")
+
+	refreshButtons()
+end)
+
+player.CharacterAdded:Connect(function()
+	seat=nil vehicle=nil cruiseSpeed=0
+end)
+
+refreshButtons()
+print("[AXIOM DRIVING ASSIST UI V2] ONLINE")
