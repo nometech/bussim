@@ -1,385 +1,649 @@
---!strict
--- BusDevUI_LocalScript.lua
--- Put THIS FILE CONTENT directly inside a LocalScript at:
--- StarterPlayer > StarterPlayerScripts
--- Then press Play.
---
--- Intended for a Roblox experience/place you own or are authorized to test.
+--[[
+    AXIOM BUS TOOL
+    Place as a LocalScript inside:
+    StarterPlayer > StarterPlayerScripts
+
+    Requirements:
+    - Your bus model should be tagged "Bus" with CollectionService
+      OR contain a VehicleSeat.
+    - Key: SEPDEPTRAI
+]]
 
 local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local CollectionService = game:GetService("CollectionService")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 
-local player = Players.LocalPlayer
-local playerGui = player:WaitForChild("PlayerGui")
+local Player = Players.LocalPlayer
+local PlayerGui = Player:WaitForChild("PlayerGui")
 
-print("[BusDevUI] LocalScript started for:", player.Name)
+local CONFIG = {
+	KEY = "SEPDEPTRAI",
 
--- Clean previous copy
-local oldGui = playerGui:FindFirstChild("BusDevPanel")
+	DEFAULT_BUS_SPEED = 80,
+	MAX_BUS_SPEED = 400,
+	MIN_BUS_SPEED = 20,
+
+	UI_NAME = "AxiomBusTool"
+}
+
+-- =========================================================
+-- STATE
+-- =========================================================
+
+local State = {
+	Authenticated = false,
+	Noclip = false,
+	SpeedEnabled = false,
+	BusSpeed = CONFIG.DEFAULT_BUS_SPEED,
+
+	OriginalCollision = {},
+	Connections = {},
+}
+
+-- =========================================================
+-- UTILS
+-- =========================================================
+
+local function addConnection(connection)
+	table.insert(State.Connections, connection)
+	return connection
+end
+
+local function round(number)
+	return math.floor(number + 0.5)
+end
+
+local function clampSpeed(speed)
+	return math.clamp(speed, CONFIG.MIN_BUS_SPEED, CONFIG.MAX_BUS_SPEED)
+end
+
+local function findCurrentBus()
+	local character = Player.Character
+	if not character then
+		return nil
+	end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		return nil
+	end
+
+	local seat = humanoid.SeatPart
+	if not seat then
+		return nil
+	end
+
+	local model = seat:FindFirstAncestorOfClass("Model")
+
+	if model then
+		return model
+	end
+
+	return nil
+end
+
+local function getVehicleSeat(bus)
+	if not bus then
+		return nil
+	end
+
+	for _, obj in ipairs(bus:GetDescendants()) do
+		if obj:IsA("VehicleSeat") then
+			return obj
+		end
+	end
+
+	return nil
+end
+
+local function notify(title, message)
+	local StarterGui = game:GetService("StarterGui")
+
+	pcall(function()
+		StarterGui:SetCore("SendNotification", {
+			Title = title,
+			Text = message,
+			Duration = 3
+		})
+	end)
+end
+
+-- =========================================================
+-- NOCLIP
+-- =========================================================
+
+local function enableNoclip(bus)
+	if not bus then
+		return
+	end
+
+	for _, part in ipairs(bus:GetDescendants()) do
+		if part:IsA("BasePart") then
+
+			if State.OriginalCollision[part] == nil then
+				State.OriginalCollision[part] = part.CanCollide
+			end
+
+			part.CanCollide = false
+		end
+	end
+end
+
+local function restoreCollision()
+	for part, originalValue in pairs(State.OriginalCollision) do
+		if part and part.Parent then
+			part.CanCollide = originalValue
+		end
+	end
+
+	table.clear(State.OriginalCollision)
+end
+
+-- =========================================================
+-- BUS SPEED
+-- =========================================================
+
+local function applyBusSpeed(bus)
+	local vehicleSeat = getVehicleSeat(bus)
+
+	if vehicleSeat then
+		vehicleSeat.MaxSpeed = State.BusSpeed
+	end
+end
+
+-- =========================================================
+-- MAIN LOOP
+-- =========================================================
+
+addConnection(
+	RunService.Heartbeat:Connect(function()
+
+		if not State.Authenticated then
+			return
+		end
+
+		local bus = findCurrentBus()
+
+		if not bus then
+			return
+		end
+
+		if State.Noclip then
+			enableNoclip(bus)
+		end
+
+		if State.SpeedEnabled then
+			applyBusSpeed(bus)
+		end
+	end)
+)
+
+-- =========================================================
+-- GUI
+-- =========================================================
+
+local oldGui = PlayerGui:FindFirstChild(CONFIG.UI_NAME)
+
 if oldGui then
 	oldGui:Destroy()
 end
 
-local gui = Instance.new("ScreenGui")
-gui.Name = "BusDevPanel"
-gui.ResetOnSpawn = false
-gui.IgnoreGuiInset = true
-gui.Enabled = true
-gui.DisplayOrder = 999999
-gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-gui.Parent = playerGui
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = CONFIG.UI_NAME
+ScreenGui.ResetOnSpawn = false
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.Parent = PlayerGui
 
-local main = Instance.new("Frame")
-main.Name = "Main"
-main.Size = UDim2.fromOffset(420, 470)
-main.Position = UDim2.new(0.5, -210, 0.5, -235)
-main.BackgroundColor3 = Color3.fromRGB(14, 16, 22)
-main.BorderSizePixel = 0
-main.ZIndex = 10
-main.Parent = gui
-
-local mainCorner = Instance.new("UICorner")
-mainCorner.CornerRadius = UDim.new(0, 18)
-mainCorner.Parent = main
-
-local mainStroke = Instance.new("UIStroke")
-mainStroke.Color = Color3.fromRGB(85, 95, 135)
-mainStroke.Transparency = 0.25
-mainStroke.Thickness = 1
-mainStroke.Parent = main
-
-local topGlow = Instance.new("Frame")
-topGlow.Name = "TopGlow"
-topGlow.Size = UDim2.new(1, 0, 0, 4)
-topGlow.Position = UDim2.new(0, 0, 0, 0)
-topGlow.BackgroundColor3 = Color3.fromRGB(87, 105, 255)
-topGlow.BorderSizePixel = 0
-topGlow.ZIndex = 11
-topGlow.Parent = main
-
-local topGlowCorner = Instance.new("UICorner")
-topGlowCorner.CornerRadius = UDim.new(0, 18)
-topGlowCorner.Parent = topGlow
-
-local function makeLabel(
-	text: string,
-	x: number,
-	y: number,
-	w: number,
-	h: number,
-	size: number,
-	bold: boolean?,
-	color: Color3?
+-- MAIN
+local Main = Instance.new("Frame")
+Main.Name = "Main"
+Main.Size = UDim2.fromOffset(460, 330)
+Main.Position = UDim2.new(
+	0.5,
+	-230,
+	0.5,
+	-165
 )
-	local label = Instance.new("TextLabel")
-	label.BackgroundTransparency = 1
-	label.Position = UDim2.fromOffset(x, y)
-	label.Size = UDim2.fromOffset(w, h)
-	label.Text = text
-	label.TextColor3 = color or Color3.fromRGB(240, 242, 250)
-	label.Font = bold and Enum.Font.GothamBold or Enum.Font.Gotham
-	label.TextSize = size
-	label.TextXAlignment = Enum.TextXAlignment.Left
-	label.ZIndex = 12
-	label.Parent = main
-	return label
+
+Main.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+Main.BorderSizePixel = 0
+Main.Parent = ScreenGui
+
+local MainCorner = Instance.new("UICorner")
+MainCorner.CornerRadius = UDim.new(0, 14)
+MainCorner.Parent = Main
+
+local Stroke = Instance.new("UIStroke")
+Stroke.Color = Color3.fromRGB(70, 70, 90)
+Stroke.Thickness = 1
+Stroke.Transparency = 0.2
+Stroke.Parent = Main
+
+-- HEADER
+local Header = Instance.new("Frame")
+Header.Size = UDim2.new(1, 0, 0, 48)
+Header.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
+Header.BorderSizePixel = 0
+Header.Parent = Main
+
+local HeaderCorner = Instance.new("UICorner")
+HeaderCorner.CornerRadius = UDim.new(0, 14)
+HeaderCorner.Parent = Header
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -60, 1, 0)
+Title.Position = UDim2.fromOffset(16, 0)
+Title.BackgroundTransparency = 1
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 18
+Title.TextColor3 = Color3.fromRGB(240, 240, 245)
+Title.Text = "AXIOM BUS TOOL"
+Title.Parent = Header
+
+local Close = Instance.new("TextButton")
+Close.Size = UDim2.fromOffset(36, 36)
+Close.Position = UDim2.new(1, -42, 0, 6)
+Close.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+Close.Text = "×"
+Close.TextSize = 25
+Close.TextColor3 = Color3.new(1, 1, 1)
+Close.Font = Enum.Font.GothamBold
+Close.BorderSizePixel = 0
+Close.Parent = Header
+
+Instance.new("UICorner", Close).CornerRadius = UDim.new(0, 8)
+
+Close.MouseButton1Click:Connect(function()
+	restoreCollision()
+	ScreenGui:Destroy()
+end)
+
+-- =========================================================
+-- DRAGGING
+-- =========================================================
+
+do
+	local dragging = false
+	local dragStart
+	local startPosition
+
+	Header.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+
+			dragging = true
+			dragStart = input.Position
+			startPosition = Main.Position
+		end
+	end)
+
+	Header.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+
+			dragging = false
+		end
+	end)
+
+	UserInputService.InputChanged:Connect(function(input)
+		if not dragging then
+			return
+		end
+
+		if input.UserInputType ~= Enum.UserInputType.MouseMovement
+			and input.UserInputType ~= Enum.UserInputType.Touch then
+			return
+		end
+
+		local delta = input.Position - dragStart
+
+		Main.Position = UDim2.new(
+			startPosition.X.Scale,
+			startPosition.X.Offset + delta.X,
+			startPosition.Y.Scale,
+			startPosition.Y.Offset + delta.Y
+		)
+	end)
 end
 
-local function makeButton(
-	text: string,
-	x: number,
-	y: number,
-	w: number,
-	h: number
-)
+-- =========================================================
+-- LOGIN PAGE
+-- =========================================================
+
+local LoginPage = Instance.new("Frame")
+LoginPage.Size = UDim2.new(1, -30, 1, -70)
+LoginPage.Position = UDim2.fromOffset(15, 60)
+LoginPage.BackgroundTransparency = 1
+LoginPage.Parent = Main
+
+local KeyTitle = Instance.new("TextLabel")
+KeyTitle.Size = UDim2.new(1, 0, 0, 40)
+KeyTitle.BackgroundTransparency = 1
+KeyTitle.Text = "Nhập key"
+KeyTitle.Font = Enum.Font.GothamBold
+KeyTitle.TextSize = 23
+KeyTitle.TextColor3 = Color3.fromRGB(235, 235, 240)
+KeyTitle.Parent = LoginPage
+
+local KeyBox = Instance.new("TextBox")
+KeyBox.Size = UDim2.new(1, -40, 0, 48)
+KeyBox.Position = UDim2.new(0, 20, 0, 65)
+KeyBox.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+KeyBox.BorderSizePixel = 0
+KeyBox.PlaceholderText = "Key..."
+KeyBox.Text = ""
+KeyBox.ClearTextOnFocus = false
+KeyBox.TextColor3 = Color3.new(1, 1, 1)
+KeyBox.PlaceholderColor3 = Color3.fromRGB(120, 120, 130)
+KeyBox.Font = Enum.Font.Gotham
+KeyBox.TextSize = 17
+KeyBox.Parent = LoginPage
+
+Instance.new("UICorner", KeyBox).CornerRadius = UDim.new(0, 10)
+
+local Login = Instance.new("TextButton")
+Login.Size = UDim2.new(1, -40, 0, 48)
+Login.Position = UDim2.new(0, 20, 0, 125)
+Login.BackgroundColor3 = Color3.fromRGB(65, 90, 255)
+Login.Text = "UNLOCK"
+Login.TextColor3 = Color3.new(1, 1, 1)
+Login.Font = Enum.Font.GothamBold
+Login.TextSize = 16
+Login.BorderSizePixel = 0
+Login.Parent = LoginPage
+
+Instance.new("UICorner", Login).CornerRadius = UDim.new(0, 10)
+
+local Status = Instance.new("TextLabel")
+Status.Size = UDim2.new(1, 0, 0, 35)
+Status.Position = UDim2.new(0, 0, 0, 185)
+Status.BackgroundTransparency = 1
+Status.Text = "Key: SEPDEPTRAI"
+Status.TextColor3 = Color3.fromRGB(145, 145, 160)
+Status.Font = Enum.Font.Gotham
+Status.TextSize = 14
+Status.Parent = LoginPage
+
+-- =========================================================
+-- TOOL PAGE
+-- =========================================================
+
+local ToolPage = Instance.new("Frame")
+ToolPage.Size = LoginPage.Size
+ToolPage.Position = LoginPage.Position
+ToolPage.BackgroundTransparency = 1
+ToolPage.Visible = false
+ToolPage.Parent = Main
+
+local function createButton(text, y)
 	local button = Instance.new("TextButton")
-	button.Position = UDim2.fromOffset(x, y)
-	button.Size = UDim2.fromOffset(w, h)
-	button.BackgroundColor3 = Color3.fromRGB(35, 39, 52)
+
+	button.Size = UDim2.new(1, -40, 0, 42)
+	button.Position = UDim2.new(0, 20, 0, y)
+	button.BackgroundColor3 = Color3.fromRGB(30, 30, 42)
 	button.BorderSizePixel = 0
+
 	button.Text = text
-	button.TextColor3 = Color3.fromRGB(245, 245, 250)
-	button.Font = Enum.Font.GothamBold
-	button.TextSize = 14
-	button.AutoButtonColor = false
-	button.ZIndex = 12
-	button.Parent = main
+	button.TextColor3 = Color3.fromRGB(230, 230, 235)
+	button.Font = Enum.Font.GothamSemibold
+	button.TextSize = 15
+
+	button.Parent = ToolPage
 
 	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 11)
+	corner.CornerRadius = UDim.new(0, 9)
 	corner.Parent = button
 
 	return button
 end
 
-local title = makeLabel(
-	"BUS DEV CONTROL",
-	22, 18, 300, 30,
-	22, true
-)
-title.Active = true
-
-makeLabel(
-	"LocalScript UI build • private QA",
-	22, 52, 320, 22,
-	12, false,
-	Color3.fromRGB(140, 145, 165)
+local SpeedToggle = createButton(
+	"Unlock Bus Speed: OFF",
+	0
 )
 
-local closeButton = makeButton("×", 360, 16, 40, 40)
-closeButton.TextSize = 24
-
-local keyBox = Instance.new("TextBox")
-keyBox.Position = UDim2.fromOffset(22, 92)
-keyBox.Size = UDim2.fromOffset(376, 48)
-keyBox.BackgroundColor3 = Color3.fromRGB(24, 27, 37)
-keyBox.BorderSizePixel = 0
-keyBox.TextColor3 = Color3.fromRGB(245, 245, 250)
-keyBox.PlaceholderText = "Nhập key..."
-keyBox.PlaceholderColor3 = Color3.fromRGB(100, 105, 120)
-keyBox.Text = ""
-keyBox.ClearTextOnFocus = false
-keyBox.Font = Enum.Font.GothamMedium
-keyBox.TextSize = 15
-keyBox.ZIndex = 12
-keyBox.Parent = main
-
-local keyCorner = Instance.new("UICorner")
-keyCorner.CornerRadius = UDim.new(0, 11)
-keyCorner.Parent = keyBox
-
-local keyPadding = Instance.new("UIPadding")
-keyPadding.PaddingLeft = UDim.new(0, 14)
-keyPadding.PaddingRight = UDim.new(0, 14)
-keyPadding.Parent = keyBox
-
-local authButton = makeButton("XÁC THỰC", 22, 152, 376, 46)
-authButton.BackgroundColor3 = Color3.fromRGB(68, 88, 255)
-
-local speed = 120
-local speedLabel = makeLabel(
-	"Tốc độ: 120",
-	22, 220, 200, 24,
-	15, true
+local NoclipToggle = createButton(
+	"Bus Noclip: OFF",
+	52
 )
 
-local minusButton = makeButton("-", 22, 255, 76, 44)
-minusButton.TextSize = 22
-
-local applyButton = makeButton("ÁP DỤNG", 110, 255, 200, 44)
-
-local plusButton = makeButton("+", 322, 255, 76, 44)
-plusButton.TextSize = 22
-
-local noClipButton = makeButton("NO-CLIP XE: OFF", 22, 320, 376, 50)
-
-local statusLabel = makeLabel(
-	"UI đã hiển thị. Chưa xác thực.",
-	22, 392, 376, 24,
-	13, false,
-	Color3.fromRGB(160, 166, 188)
+local SpeedMinus = createButton(
+	"- 20 Speed",
+	104
 )
 
-local hintLabel = makeLabel(
-	"RightShift: Ẩn / hiện UI",
-	22, 425, 376, 18,
-	11, false,
-	Color3.fromRGB(92, 98, 118)
+SpeedMinus.Size = UDim2.new(0.5, -25, 0, 42)
+
+local SpeedPlus = createButton(
+	"+ 20 Speed",
+	104
 )
 
-local authenticated = false
-local noClipEnabled = false
+SpeedPlus.Size = UDim2.new(0.5, -25, 0, 42)
+SpeedPlus.Position = UDim2.new(0.5, 5, 0, 104)
 
-local function tweenColor(button: GuiButton, color: Color3)
-	TweenService:Create(
-		button,
-		TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-		{BackgroundColor3 = color}
-	):Play()
-end
+local SpeedLabel = Instance.new("TextLabel")
+SpeedLabel.Size = UDim2.new(1, -40, 0, 40)
+SpeedLabel.Position = UDim2.new(0, 20, 0, 156)
+SpeedLabel.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
+SpeedLabel.BorderSizePixel = 0
 
--- Optional remotes.
--- The UI still appears even if the server system does not exist.
-local remotes = ReplicatedStorage:FindFirstChild("BusAdminRemotes")
+SpeedLabel.Text =
+	"Bus Speed: " .. State.BusSpeed
 
-local AuthRemote: RemoteEvent? = nil
-local SpeedRemote: RemoteEvent? = nil
-local NoClipRemote: RemoteEvent? = nil
-local StatusRemote: RemoteEvent? = nil
+SpeedLabel.TextColor3 =
+	Color3.fromRGB(245, 245, 250)
 
-if remotes then
-	local a = remotes:FindFirstChild("Auth")
-	local s = remotes:FindFirstChild("SetSpeed")
-	local n = remotes:FindFirstChild("SetNoClip")
-	local st = remotes:FindFirstChild("Status")
+SpeedLabel.Font =
+	Enum.Font.GothamBold
 
-	if a and a:IsA("RemoteEvent") then AuthRemote = a end
-	if s and s:IsA("RemoteEvent") then SpeedRemote = s end
-	if n and n:IsA("RemoteEvent") then NoClipRemote = n end
-	if st and st:IsA("RemoteEvent") then StatusRemote = st end
-else
-	statusLabel.Text = "UI OK • chưa có BusAdminRemotes trên server."
-end
+SpeedLabel.TextSize = 16
+SpeedLabel.Parent = ToolPage
+
+Instance.new(
+	"UICorner",
+	SpeedLabel
+).CornerRadius = UDim.new(0, 9)
+
+local ResetButton = createButton(
+	"RESET BUS SETTINGS",
+	208
+)
+
+-- =========================================================
+-- LOGIN LOGIC
+-- =========================================================
 
 local function authenticate()
-	local key = keyBox.Text
+	local enteredKey =
+		string.upper(
+			string.gsub(
+				KeyBox.Text,
+				"%s+",
+				""
+			)
+		)
 
-	if key == "" then
-		statusLabel.Text = "Nhập key trước."
-		return
-	end
+	if enteredKey == CONFIG.KEY then
 
-	-- UI verification for the owner's fixed key.
-	if key == "SEPDEPTRAI" then
-		authenticated = true
-		authButton.Text = "ĐÃ XÁC THỰC"
-		tweenColor(authButton, Color3.fromRGB(42, 145, 84))
-		statusLabel.Text = "Key hợp lệ. Quyền DEV đã mở."
+		State.Authenticated = true
+
+		Status.Text = "✓ ACCESS GRANTED"
+		Status.TextColor3 =
+			Color3.fromRGB(80, 255, 140)
+
+		task.wait(0.25)
+
+		LoginPage.Visible = false
+		ToolPage.Visible = true
+
+		notify(
+			"Axiom Bus Tool",
+			"Key accepted."
+		)
+
 	else
-		authenticated = false
-		authButton.Text = "SAI KEY"
-		tweenColor(authButton, Color3.fromRGB(180, 55, 65))
-		statusLabel.Text = "Sai key."
-		return
-	end
 
-	if AuthRemote then
-		AuthRemote:FireServer(key)
+		Status.Text = "✕ KEY KHÔNG HỢP LỆ"
+		Status.TextColor3 =
+			Color3.fromRGB(255, 80, 80)
+
+		local original =
+			KeyBox.Position
+
+		for _ = 1, 3 do
+
+			KeyBox.Position =
+				original +
+				UDim2.fromOffset(5, 0)
+
+			task.wait(0.04)
+
+			KeyBox.Position =
+				original -
+				UDim2.fromOffset(5, 0)
+
+			task.wait(0.04)
+		end
+
+		KeyBox.Position = original
 	end
 end
 
-authButton.MouseButton1Click:Connect(authenticate)
+Login.MouseButton1Click:Connect(
+	authenticate
+)
 
-keyBox.FocusLost:Connect(function(enterPressed)
+KeyBox.FocusLost:Connect(function(enterPressed)
 	if enterPressed then
 		authenticate()
 	end
 end)
 
-minusButton.MouseButton1Click:Connect(function()
-	speed = math.max(60, speed - 20)
-	speedLabel.Text = "Tốc độ: " .. tostring(speed)
-end)
+-- =========================================================
+-- BUTTON LOGIC
+-- =========================================================
 
-plusButton.MouseButton1Click:Connect(function()
-	speed = math.min(300, speed + 20)
-	speedLabel.Text = "Tốc độ: " .. tostring(speed)
-end)
+SpeedToggle.MouseButton1Click:Connect(function()
 
-applyButton.MouseButton1Click:Connect(function()
-	if not authenticated then
-		statusLabel.Text = "Chưa xác thực."
-		return
-	end
+	State.SpeedEnabled =
+		not State.SpeedEnabled
 
-	if SpeedRemote then
-		SpeedRemote:FireServer(speed)
-		statusLabel.Text = "Đã gửi tốc độ lên server: " .. tostring(speed)
+	if State.SpeedEnabled then
+
+		SpeedToggle.Text =
+			"Unlock Bus Speed: ON"
+
 	else
-		statusLabel.Text = "UI OK • chưa có server handler tốc độ."
+
+		SpeedToggle.Text =
+			"Unlock Bus Speed: OFF"
+
 	end
+
 end)
 
-noClipButton.MouseButton1Click:Connect(function()
-	if not authenticated then
-		statusLabel.Text = "Chưa xác thực."
-		return
+NoclipToggle.MouseButton1Click:Connect(function()
+
+	State.Noclip =
+		not State.Noclip
+
+	if State.Noclip then
+
+		NoclipToggle.Text =
+			"Bus Noclip: ON"
+
+	else
+
+		NoclipToggle.Text =
+			"Bus Noclip: OFF"
+
+		restoreCollision()
+
 	end
 
-	noClipEnabled = not noClipEnabled
-	noClipButton.Text = noClipEnabled
-		and "NO-CLIP XE: ON"
-		or "NO-CLIP XE: OFF"
+end)
 
-	tweenColor(
-		noClipButton,
-		noClipEnabled
-			and Color3.fromRGB(42, 145, 84)
-			or Color3.fromRGB(35, 39, 52)
+SpeedPlus.MouseButton1Click:Connect(function()
+
+	State.BusSpeed =
+		clampSpeed(
+			State.BusSpeed + 20
+		)
+
+	SpeedLabel.Text =
+		"Bus Speed: "
+		.. round(State.BusSpeed)
+
+end)
+
+SpeedMinus.MouseButton1Click:Connect(function()
+
+	State.BusSpeed =
+		clampSpeed(
+			State.BusSpeed - 20
+		)
+
+	SpeedLabel.Text =
+		"Bus Speed: "
+		.. round(State.BusSpeed)
+
+end)
+
+ResetButton.MouseButton1Click:Connect(function()
+
+	State.Noclip = false
+	State.SpeedEnabled = false
+
+	State.BusSpeed =
+		CONFIG.DEFAULT_BUS_SPEED
+
+	restoreCollision()
+
+	SpeedToggle.Text =
+		"Unlock Bus Speed: OFF"
+
+	NoclipToggle.Text =
+		"Bus Noclip: OFF"
+
+	SpeedLabel.Text =
+		"Bus Speed: "
+		.. State.BusSpeed
+
+	local bus = findCurrentBus()
+	local seat = getVehicleSeat(bus)
+
+	if seat then
+		seat.MaxSpeed =
+			CONFIG.DEFAULT_BUS_SPEED
+	end
+
+	notify(
+		"Axiom Bus Tool",
+		"Settings reset."
 	)
 
-	if NoClipRemote then
-		NoClipRemote:FireServer(noClipEnabled)
-		statusLabel.Text = noClipEnabled and "No-clip: ON" or "No-clip: OFF"
-	else
-		statusLabel.Text = "UI OK • chưa có server handler no-clip."
-	end
 end)
 
-if StatusRemote then
-	StatusRemote.OnClientEvent:Connect(function(data)
-		if typeof(data) ~= "table" then
-			return
-		end
-
-		statusLabel.Text = tostring(data.message or statusLabel.Text)
-
-		if data.code == "AUTH_OK" then
-			authenticated = true
-			authButton.Text = "ĐÃ XÁC THỰC"
-			tweenColor(authButton, Color3.fromRGB(42, 145, 84))
-		end
-	end)
-end
-
-closeButton.MouseButton1Click:Connect(function()
-	gui.Enabled = false
-end)
-
--- Drag window
-local dragging = false
-local dragStart: Vector2? = nil
-local originalPosition: UDim2? = nil
-
-title.InputBegan:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton1
-		or input.UserInputType == Enum.UserInputType.Touch
-	then
-		dragging = true
-		dragStart = input.Position
-		originalPosition = main.Position
-	end
-end)
-
-UserInputService.InputChanged:Connect(function(input)
-	if not dragging or not dragStart or not originalPosition then
-		return
-	end
-
-	if input.UserInputType ~= Enum.UserInputType.MouseMovement
-		and input.UserInputType ~= Enum.UserInputType.Touch
-	then
-		return
-	end
-
-	local delta = input.Position - dragStart
-
-	main.Position = UDim2.new(
-		originalPosition.X.Scale,
-		originalPosition.X.Offset + delta.X,
-		originalPosition.Y.Scale,
-		originalPosition.Y.Offset + delta.Y
-	)
-end)
-
-UserInputService.InputEnded:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton1
-		or input.UserInputType == Enum.UserInputType.Touch
-	then
-		dragging = false
-	end
-end)
+-- =========================================================
+-- KEYBOARD UI TOGGLE
+-- RightShift = Hide / Show
+-- =========================================================
 
 UserInputService.InputBegan:Connect(function(input, processed)
+
 	if processed then
 		return
 	end
 
-	if input.KeyCode == Enum.KeyCode.RightShift then
-		gui.Enabled = not gui.Enabled
-	end
-end)
+	if input.KeyCode ==
+		Enum.KeyCode.RightShift then
 
-print("[BusDevUI] UI created successfully:", gui:GetFullName())
+		Main.Visible =
+			not Main.Visible
+	end
+
+end)
