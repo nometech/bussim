@@ -1,225 +1,10 @@
---[[
-BUS DEV CONTROL - STUDIO INSTALLER v2
-=====================================
-Use only in a Roblox experience/place you own or are authorized to test.
-
-IMPORTANT:
-- Run this in Roblox Studio -> View -> Command Bar while NOT in Play mode.
-- After it prints "INSTALLED", press Play.
-- UI is installed under StarterGui so it appears immediately for LocalPlayer.
-- RightShift toggles the UI.
-- Master key: SEPDEPTRAI
-]]
-
-local ServerScriptService = game:GetService("ServerScriptService")
-local StarterGui = game:GetService("StarterGui")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-
-local function ensureFolder(parent, name)
-	local obj = parent:FindFirstChild(name)
-	if obj and not obj:IsA("Folder") then
-		obj:Destroy()
-		obj = nil
-	end
-	if not obj then
-		obj = Instance.new("Folder")
-		obj.Name = name
-		obj.Parent = parent
-	end
-	return obj
-end
-
-local remoteFolder = ensureFolder(ReplicatedStorage, "BusAdminRemotes")
-
-for _, name in ipairs({"Auth", "SetSpeed", "SetNoClip", "Status"}) do
-	local obj = remoteFolder:FindFirstChild(name)
-	if obj and not obj:IsA("RemoteEvent") then
-		obj:Destroy()
-		obj = nil
-	end
-	if not obj then
-		local remote = Instance.new("RemoteEvent")
-		remote.Name = name
-		remote.Parent = remoteFolder
-	end
-end
-
-local serverSource = [==[
 --!strict
-
-local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local PhysicsService = game:GetService("PhysicsService")
-
-local remotes = ReplicatedStorage:WaitForChild("BusAdminRemotes")
-local AuthRemote = remotes:WaitForChild("Auth") :: RemoteEvent
-local SpeedRemote = remotes:WaitForChild("SetSpeed") :: RemoteEvent
-local NoClipRemote = remotes:WaitForChild("SetNoClip") :: RemoteEvent
-local StatusRemote = remotes:WaitForChild("Status") :: RemoteEvent
-
-local MASTER_KEY = "SEPDEPTRAI"
-local MIN_SPEED = 60
-local MAX_SPEED = 300
-local NOCLIP_GROUP = "BusAdminNoClip"
-
-local authorized: {[Player]: boolean} = {}
-
-pcall(function()
-	PhysicsService:RegisterCollisionGroup(NOCLIP_GROUP)
-end)
-
-PhysicsService:CollisionGroupSetCollidable(NOCLIP_GROUP, "Default", false)
-
-local function send(player: Player, ok: boolean, message: string, code: string?)
-	StatusRemote:FireClient(player, {
-		ok = ok,
-		message = message,
-		code = code,
-	})
-end
-
-local function getSeat(player: Player): VehicleSeat?
-	local char = player.Character
-	if not char then return nil end
-
-	local hum = char:FindFirstChildOfClass("Humanoid")
-	if not hum then return nil end
-
-	local seat = hum.SeatPart
-	if seat and seat:IsA("VehicleSeat") then
-		return seat
-	end
-
-	return nil
-end
-
-local function getVehicle(seat: BasePart): Model?
-	local node: Instance? = seat
-	while node do
-		if node:IsA("Model") then
-			return node
-		end
-		node = node.Parent
-	end
-	return nil
-end
-
-local function eachPart(root: Instance, fn: (BasePart) -> ())
-	if root:IsA("BasePart") then
-		fn(root)
-	end
-
-	for _, obj in ipairs(root:GetDescendants()) do
-		if obj:IsA("BasePart") then
-			fn(obj)
-		end
-	end
-end
-
-local function setNoClip(vehicle: Model, enabled: boolean)
-	eachPart(vehicle, function(part)
-		if enabled then
-			if part:GetAttribute("BusAdminOriginalCollisionGroup") == nil then
-				part:SetAttribute("BusAdminOriginalCollisionGroup", part.CollisionGroup)
-			end
-			part.CollisionGroup = NOCLIP_GROUP
-		else
-			local original = part:GetAttribute("BusAdminOriginalCollisionGroup")
-			if typeof(original) == "string" and original ~= "" then
-				part.CollisionGroup = original
-			else
-				part.CollisionGroup = "Default"
-			end
-			part:SetAttribute("BusAdminOriginalCollisionGroup", nil)
-		end
-	end)
-end
-
-AuthRemote.OnServerEvent:Connect(function(player, key)
-	if typeof(key) ~= "string" then
-		send(player, false, "Key không hợp lệ.", "AUTH_INVALID")
-		return
-	end
-
-	if key == MASTER_KEY then
-		authorized[player] = true
-		send(player, true, "Đã xác thực quyền DEV.", "AUTH_OK")
-	else
-		authorized[player] = nil
-		send(player, false, "Sai key.", "AUTH_FAILED")
-	end
-end)
-
-SpeedRemote.OnServerEvent:Connect(function(player, requestedSpeed)
-	if not authorized[player] then
-		send(player, false, "Chưa xác thực.", "NOT_AUTHORIZED")
-		return
-	end
-
-	if typeof(requestedSpeed) ~= "number" then
-		return
-	end
-
-	local seat = getSeat(player)
-	if not seat then
-		send(player, false, "Chưa ngồi VehicleSeat.", "NO_SEAT")
-		return
-	end
-
-	local speed = math.clamp(math.floor(requestedSpeed), MIN_SPEED, MAX_SPEED)
-
-	seat.MaxSpeed = speed
-	seat:SetAttribute("DevMaxSpeed", speed)
-
-	local vehicle = getVehicle(seat)
-	if vehicle then
-		vehicle:SetAttribute("DevMaxSpeed", speed)
-	end
-
-	send(player, true, ("Tốc độ: %d"):format(speed), "SPEED_OK")
-end)
-
-NoClipRemote.OnServerEvent:Connect(function(player, enabled)
-	if not authorized[player] then
-		send(player, false, "Chưa xác thực.", "NOT_AUTHORIZED")
-		return
-	end
-
-	if typeof(enabled) ~= "boolean" then
-		return
-	end
-
-	local seat = getSeat(player)
-	if not seat then
-		send(player, false, "Chưa ngồi VehicleSeat.", "NO_SEAT")
-		return
-	end
-
-	local vehicle = getVehicle(seat)
-	if not vehicle then
-		send(player, false, "Không tìm thấy model xe.", "NO_MODEL")
-		return
-	end
-
-	setNoClip(vehicle, enabled)
-
-	send(
-		player,
-		true,
-		enabled and "No-clip xe: ON" or "No-clip xe: OFF",
-		enabled and "NOCLIP_ON" or "NOCLIP_OFF"
-	)
-end)
-
-Players.PlayerRemoving:Connect(function(player)
-	authorized[player] = nil
-end)
-
-print("[BusAdmin] Server ready")
-]==]
-
-local clientSource = [==[
---!strict
+-- BusDevUI_LocalScript.lua
+-- Put THIS FILE CONTENT directly inside a LocalScript at:
+-- StarterPlayer > StarterPlayerScripts
+-- Then press Play.
+--
+-- Intended for a Roblox experience/place you own or are authorized to test.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -227,298 +12,362 @@ local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 
 local player = Players.LocalPlayer
-local gui = script.Parent
+local playerGui = player:WaitForChild("PlayerGui")
 
-assert(gui:IsA("ScreenGui"), "BusAdmin client must be inside ScreenGui")
+print("[BusDevUI] LocalScript started for:", player.Name)
 
-gui.Enabled = true
+-- Clean previous copy
+local oldGui = playerGui:FindFirstChild("BusDevPanel")
+if oldGui then
+	oldGui:Destroy()
+end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "BusDevPanel"
 gui.ResetOnSpawn = false
 gui.IgnoreGuiInset = true
+gui.Enabled = true
 gui.DisplayOrder = 999999
 gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-
-local old = gui:FindFirstChild("Main")
-if old then
-	old:Destroy()
-end
+gui.Parent = playerGui
 
 local main = Instance.new("Frame")
 main.Name = "Main"
-main.Size = UDim2.fromOffset(400, 440)
-main.Position = UDim2.new(0, 24, 0.5, -220)
-main.BackgroundColor3 = Color3.fromRGB(15, 17, 23)
+main.Size = UDim2.fromOffset(420, 470)
+main.Position = UDim2.new(0.5, -210, 0.5, -235)
+main.BackgroundColor3 = Color3.fromRGB(14, 16, 22)
 main.BorderSizePixel = 0
 main.ZIndex = 10
 main.Parent = gui
 
-Instance.new("UICorner", main).CornerRadius = UDim.new(0, 18)
+local mainCorner = Instance.new("UICorner")
+mainCorner.CornerRadius = UDim.new(0, 18)
+mainCorner.Parent = main
 
-local stroke = Instance.new("UIStroke")
-stroke.Color = Color3.fromRGB(75, 84, 115)
-stroke.Transparency = 0.25
-stroke.Thickness = 1
-stroke.Parent = main
+local mainStroke = Instance.new("UIStroke")
+mainStroke.Color = Color3.fromRGB(85, 95, 135)
+mainStroke.Transparency = 0.25
+mainStroke.Thickness = 1
+mainStroke.Parent = main
 
-local function label(text, pos, size, font, textSize, color)
-	local o = Instance.new("TextLabel")
-	o.BackgroundTransparency = 1
-	o.Text = text
-	o.Position = pos
-	o.Size = size
-	o.Font = font or Enum.Font.Gotham
-	o.TextSize = textSize or 14
-	o.TextColor3 = color or Color3.new(1,1,1)
-	o.TextXAlignment = Enum.TextXAlignment.Left
-	o.ZIndex = 11
-	o.Parent = main
-	return o
+local topGlow = Instance.new("Frame")
+topGlow.Name = "TopGlow"
+topGlow.Size = UDim2.new(1, 0, 0, 4)
+topGlow.Position = UDim2.new(0, 0, 0, 0)
+topGlow.BackgroundColor3 = Color3.fromRGB(87, 105, 255)
+topGlow.BorderSizePixel = 0
+topGlow.ZIndex = 11
+topGlow.Parent = main
+
+local topGlowCorner = Instance.new("UICorner")
+topGlowCorner.CornerRadius = UDim.new(0, 18)
+topGlowCorner.Parent = topGlow
+
+local function makeLabel(
+	text: string,
+	x: number,
+	y: number,
+	w: number,
+	h: number,
+	size: number,
+	bold: boolean?,
+	color: Color3?
+)
+	local label = Instance.new("TextLabel")
+	label.BackgroundTransparency = 1
+	label.Position = UDim2.fromOffset(x, y)
+	label.Size = UDim2.fromOffset(w, h)
+	label.Text = text
+	label.TextColor3 = color or Color3.fromRGB(240, 242, 250)
+	label.Font = bold and Enum.Font.GothamBold or Enum.Font.Gotham
+	label.TextSize = size
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.ZIndex = 12
+	label.Parent = main
+	return label
 end
 
-local function button(text, pos, size)
-	local o = Instance.new("TextButton")
-	o.Text = text
-	o.Position = pos
-	o.Size = size
-	o.BackgroundColor3 = Color3.fromRGB(36, 40, 54)
-	o.TextColor3 = Color3.fromRGB(245,245,250)
-	o.Font = Enum.Font.GothamBold
-	o.TextSize = 14
-	o.AutoButtonColor = false
-	o.ZIndex = 11
-	o.Parent = main
-	Instance.new("UICorner", o).CornerRadius = UDim.new(0, 11)
-	return o
+local function makeButton(
+	text: string,
+	x: number,
+	y: number,
+	w: number,
+	h: number
+)
+	local button = Instance.new("TextButton")
+	button.Position = UDim2.fromOffset(x, y)
+	button.Size = UDim2.fromOffset(w, h)
+	button.BackgroundColor3 = Color3.fromRGB(35, 39, 52)
+	button.BorderSizePixel = 0
+	button.Text = text
+	button.TextColor3 = Color3.fromRGB(245, 245, 250)
+	button.Font = Enum.Font.GothamBold
+	button.TextSize = 14
+	button.AutoButtonColor = false
+	button.ZIndex = 12
+	button.Parent = main
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 11)
+	corner.Parent = button
+
+	return button
 end
 
-local title = label(
+local title = makeLabel(
 	"BUS DEV CONTROL",
-	UDim2.fromOffset(20, 14),
-	UDim2.new(1, -80, 0, 32),
-	Enum.Font.GothamBold,
-	21,
-	Color3.fromRGB(245,247,255)
+	22, 18, 300, 30,
+	22, true
 )
 title.Active = true
 
-label(
-	"Studio / private QA panel",
-	UDim2.fromOffset(20, 46),
-	UDim2.new(1, -40, 0, 22),
-	Enum.Font.Gotham,
-	12,
-	Color3.fromRGB(135,140,160)
+makeLabel(
+	"LocalScript UI build • private QA",
+	22, 52, 320, 22,
+	12, false,
+	Color3.fromRGB(140, 145, 165)
 )
 
-local close = button("×", UDim2.new(1,-58,0,14), UDim2.fromOffset(38,38))
-close.TextSize = 24
+local closeButton = makeButton("×", 360, 16, 40, 40)
+closeButton.TextSize = 24
 
 local keyBox = Instance.new("TextBox")
-keyBox.Position = UDim2.fromOffset(20, 88)
-keyBox.Size = UDim2.new(1, -40, 0, 48)
-keyBox.BackgroundColor3 = Color3.fromRGB(24,27,36)
-keyBox.TextColor3 = Color3.fromRGB(245,245,250)
+keyBox.Position = UDim2.fromOffset(22, 92)
+keyBox.Size = UDim2.fromOffset(376, 48)
+keyBox.BackgroundColor3 = Color3.fromRGB(24, 27, 37)
+keyBox.BorderSizePixel = 0
+keyBox.TextColor3 = Color3.fromRGB(245, 245, 250)
 keyBox.PlaceholderText = "Nhập key..."
-keyBox.PlaceholderColor3 = Color3.fromRGB(105,110,125)
+keyBox.PlaceholderColor3 = Color3.fromRGB(100, 105, 120)
 keyBox.Text = ""
 keyBox.ClearTextOnFocus = false
 keyBox.Font = Enum.Font.GothamMedium
 keyBox.TextSize = 15
-keyBox.ZIndex = 11
+keyBox.ZIndex = 12
 keyBox.Parent = main
-Instance.new("UICorner", keyBox).CornerRadius = UDim.new(0,11)
 
-local pad = Instance.new("UIPadding")
-pad.PaddingLeft = UDim.new(0,14)
-pad.PaddingRight = UDim.new(0,14)
-pad.Parent = keyBox
+local keyCorner = Instance.new("UICorner")
+keyCorner.CornerRadius = UDim.new(0, 11)
+keyCorner.Parent = keyBox
 
-local authButton = button(
-	"XÁC THỰC",
-	UDim2.fromOffset(20, 146),
-	UDim2.new(1,-40,0,44)
-)
-authButton.BackgroundColor3 = Color3.fromRGB(68,88,255)
+local keyPadding = Instance.new("UIPadding")
+keyPadding.PaddingLeft = UDim.new(0, 14)
+keyPadding.PaddingRight = UDim.new(0, 14)
+keyPadding.Parent = keyBox
+
+local authButton = makeButton("XÁC THỰC", 22, 152, 376, 46)
+authButton.BackgroundColor3 = Color3.fromRGB(68, 88, 255)
 
 local speed = 120
-local speedLabel = label(
+local speedLabel = makeLabel(
 	"Tốc độ: 120",
-	UDim2.fromOffset(20, 215),
-	UDim2.new(1,-40,0,24),
-	Enum.Font.GothamMedium,
-	15,
-	Color3.fromRGB(235,237,248)
+	22, 220, 200, 24,
+	15, true
 )
 
-local minus = button("-", UDim2.fromOffset(20,250), UDim2.fromOffset(72,42))
-minus.TextSize = 22
+local minusButton = makeButton("-", 22, 255, 76, 44)
+minusButton.TextSize = 22
 
-local apply = button("ÁP DỤNG", UDim2.fromOffset(104,250), UDim2.new(1,-208,0,42))
+local applyButton = makeButton("ÁP DỤNG", 110, 255, 200, 44)
 
-local plus = button("+", UDim2.new(1,-92,0,250), UDim2.fromOffset(72,42))
-plus.TextSize = 22
+local plusButton = makeButton("+", 322, 255, 76, 44)
+plusButton.TextSize = 22
 
-local noclip = button(
-	"NO-CLIP XE: OFF",
-	UDim2.fromOffset(20,312),
-	UDim2.new(1,-40,0,48)
+local noClipButton = makeButton("NO-CLIP XE: OFF", 22, 320, 376, 50)
+
+local statusLabel = makeLabel(
+	"UI đã hiển thị. Chưa xác thực.",
+	22, 392, 376, 24,
+	13, false,
+	Color3.fromRGB(160, 166, 188)
 )
 
-local status = label(
-	"UI đã tải. Chưa xác thực.",
-	UDim2.fromOffset(20,378),
-	UDim2.new(1,-40,0,24),
-	Enum.Font.Gotham,
-	13,
-	Color3.fromRGB(160,165,185)
-)
-
-label(
+local hintLabel = makeLabel(
 	"RightShift: Ẩn / hiện UI",
-	UDim2.fromOffset(20,409),
-	UDim2.new(1,-40,0,18),
-	Enum.Font.Gotham,
-	11,
-	Color3.fromRGB(95,100,118)
+	22, 425, 376, 18,
+	11, false,
+	Color3.fromRGB(92, 98, 118)
 )
 
 local authenticated = false
-local noclipEnabled = false
+local noClipEnabled = false
 
-local remotes = ReplicatedStorage:FindFirstChild("BusAdminRemotes")
-
-if not remotes then
-	status.Text = "Lỗi: không tìm thấy BusAdminRemotes."
-	status.TextColor3 = Color3.fromRGB(255,100,100)
-	return
-end
-
-local AuthRemote = remotes:WaitForChild("Auth", 5)
-local SpeedRemote = remotes:WaitForChild("SetSpeed", 5)
-local NoClipRemote = remotes:WaitForChild("SetNoClip", 5)
-local StatusRemote = remotes:WaitForChild("Status", 5)
-
-if not (AuthRemote and SpeedRemote and NoClipRemote and StatusRemote) then
-	status.Text = "Lỗi: thiếu RemoteEvent."
-	status.TextColor3 = Color3.fromRGB(255,100,100)
-	return
-end
-
-local function setButtonColor(btn, color)
+local function tweenColor(button: GuiButton, color: Color3)
 	TweenService:Create(
-		btn,
-		TweenInfo.new(0.15, Enum.EasingStyle.Quad),
+		button,
+		TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
 		{BackgroundColor3 = color}
 	):Play()
 end
 
-authButton.MouseButton1Click:Connect(function()
-	if keyBox.Text == "" then
-		status.Text = "Nhập key trước."
+-- Optional remotes.
+-- The UI still appears even if the server system does not exist.
+local remotes = ReplicatedStorage:FindFirstChild("BusAdminRemotes")
+
+local AuthRemote: RemoteEvent? = nil
+local SpeedRemote: RemoteEvent? = nil
+local NoClipRemote: RemoteEvent? = nil
+local StatusRemote: RemoteEvent? = nil
+
+if remotes then
+	local a = remotes:FindFirstChild("Auth")
+	local s = remotes:FindFirstChild("SetSpeed")
+	local n = remotes:FindFirstChild("SetNoClip")
+	local st = remotes:FindFirstChild("Status")
+
+	if a and a:IsA("RemoteEvent") then AuthRemote = a end
+	if s and s:IsA("RemoteEvent") then SpeedRemote = s end
+	if n and n:IsA("RemoteEvent") then NoClipRemote = n end
+	if st and st:IsA("RemoteEvent") then StatusRemote = st end
+else
+	statusLabel.Text = "UI OK • chưa có BusAdminRemotes trên server."
+end
+
+local function authenticate()
+	local key = keyBox.Text
+
+	if key == "" then
+		statusLabel.Text = "Nhập key trước."
 		return
 	end
-	status.Text = "Đang xác thực..."
-	AuthRemote:FireServer(keyBox.Text)
-end)
+
+	-- UI verification for the owner's fixed key.
+	if key == "SEPDEPTRAI" then
+		authenticated = true
+		authButton.Text = "ĐÃ XÁC THỰC"
+		tweenColor(authButton, Color3.fromRGB(42, 145, 84))
+		statusLabel.Text = "Key hợp lệ. Quyền DEV đã mở."
+	else
+		authenticated = false
+		authButton.Text = "SAI KEY"
+		tweenColor(authButton, Color3.fromRGB(180, 55, 65))
+		statusLabel.Text = "Sai key."
+		return
+	end
+
+	if AuthRemote then
+		AuthRemote:FireServer(key)
+	end
+end
+
+authButton.MouseButton1Click:Connect(authenticate)
 
 keyBox.FocusLost:Connect(function(enterPressed)
 	if enterPressed then
-		authButton:Activate()
+		authenticate()
 	end
 end)
 
-minus.MouseButton1Click:Connect(function()
+minusButton.MouseButton1Click:Connect(function()
 	speed = math.max(60, speed - 20)
-	speedLabel.Text = "Tốc độ: " .. speed
+	speedLabel.Text = "Tốc độ: " .. tostring(speed)
 end)
 
-plus.MouseButton1Click:Connect(function()
+plusButton.MouseButton1Click:Connect(function()
 	speed = math.min(300, speed + 20)
-	speedLabel.Text = "Tốc độ: " .. speed
+	speedLabel.Text = "Tốc độ: " .. tostring(speed)
 end)
 
-apply.MouseButton1Click:Connect(function()
+applyButton.MouseButton1Click:Connect(function()
 	if not authenticated then
-		status.Text = "Chưa xác thực."
-		return
-	end
-	SpeedRemote:FireServer(speed)
-end)
-
-noclip.MouseButton1Click:Connect(function()
-	if not authenticated then
-		status.Text = "Chưa xác thực."
+		statusLabel.Text = "Chưa xác thực."
 		return
 	end
 
-	noclipEnabled = not noclipEnabled
-	noclip.Text = noclipEnabled and "NO-CLIP XE: ON" or "NO-CLIP XE: OFF"
-	setButtonColor(
-		noclip,
-		noclipEnabled and Color3.fromRGB(42,145,84) or Color3.fromRGB(36,40,54)
+	if SpeedRemote then
+		SpeedRemote:FireServer(speed)
+		statusLabel.Text = "Đã gửi tốc độ lên server: " .. tostring(speed)
+	else
+		statusLabel.Text = "UI OK • chưa có server handler tốc độ."
+	end
+end)
+
+noClipButton.MouseButton1Click:Connect(function()
+	if not authenticated then
+		statusLabel.Text = "Chưa xác thực."
+		return
+	end
+
+	noClipEnabled = not noClipEnabled
+	noClipButton.Text = noClipEnabled
+		and "NO-CLIP XE: ON"
+		or "NO-CLIP XE: OFF"
+
+	tweenColor(
+		noClipButton,
+		noClipEnabled
+			and Color3.fromRGB(42, 145, 84)
+			or Color3.fromRGB(35, 39, 52)
 	)
 
-	NoClipRemote:FireServer(noclipEnabled)
+	if NoClipRemote then
+		NoClipRemote:FireServer(noClipEnabled)
+		statusLabel.Text = noClipEnabled and "No-clip: ON" or "No-clip: OFF"
+	else
+		statusLabel.Text = "UI OK • chưa có server handler no-clip."
+	end
 end)
 
-close.MouseButton1Click:Connect(function()
+if StatusRemote then
+	StatusRemote.OnClientEvent:Connect(function(data)
+		if typeof(data) ~= "table" then
+			return
+		end
+
+		statusLabel.Text = tostring(data.message or statusLabel.Text)
+
+		if data.code == "AUTH_OK" then
+			authenticated = true
+			authButton.Text = "ĐÃ XÁC THỰC"
+			tweenColor(authButton, Color3.fromRGB(42, 145, 84))
+		end
+	end)
+end
+
+closeButton.MouseButton1Click:Connect(function()
 	gui.Enabled = false
 end)
 
-StatusRemote.OnClientEvent:Connect(function(data)
-	if typeof(data) ~= "table" then
-		return
-	end
-
-	status.Text = tostring(data.message or "")
-
-	if data.code == "AUTH_OK" then
-		authenticated = true
-		authButton.Text = "ĐÃ XÁC THỰC"
-		keyBox.Text = ""
-		setButtonColor(authButton, Color3.fromRGB(42,145,84))
-	elseif data.code == "AUTH_FAILED" then
-		authenticated = false
-		authButton.Text = "XÁC THỰC"
-		setButtonColor(authButton, Color3.fromRGB(180,55,65))
-	end
-end)
-
--- Dragging
+-- Drag window
 local dragging = false
 local dragStart: Vector2? = nil
-local startPos: UDim2? = nil
+local originalPosition: UDim2? = nil
 
 title.InputBegan:Connect(function(input)
 	if input.UserInputType == Enum.UserInputType.MouseButton1
-		or input.UserInputType == Enum.UserInputType.Touch then
+		or input.UserInputType == Enum.UserInputType.Touch
+	then
 		dragging = true
 		dragStart = input.Position
-		startPos = main.Position
+		originalPosition = main.Position
 	end
 end)
 
 UserInputService.InputChanged:Connect(function(input)
-	if not dragging or not dragStart or not startPos then
+	if not dragging or not dragStart or not originalPosition then
 		return
 	end
 
 	if input.UserInputType ~= Enum.UserInputType.MouseMovement
-		and input.UserInputType ~= Enum.UserInputType.Touch then
+		and input.UserInputType ~= Enum.UserInputType.Touch
+	then
 		return
 	end
 
 	local delta = input.Position - dragStart
+
 	main.Position = UDim2.new(
-		startPos.X.Scale,
-		startPos.X.Offset + delta.X,
-		startPos.Y.Scale,
-		startPos.Y.Offset + delta.Y
+		originalPosition.X.Scale,
+		originalPosition.X.Offset + delta.X,
+		originalPosition.Y.Scale,
+		originalPosition.Y.Offset + delta.Y
 	)
 end)
 
 UserInputService.InputEnded:Connect(function(input)
 	if input.UserInputType == Enum.UserInputType.MouseButton1
-		or input.UserInputType == Enum.UserInputType.Touch then
+		or input.UserInputType == Enum.UserInputType.Touch
+	then
 		dragging = false
 	end
 end)
@@ -533,65 +382,4 @@ UserInputService.InputBegan:Connect(function(input, processed)
 	end
 end)
 
-print("[BusAdmin] UI loaded for", player.Name)
-]==]
-
-local function replaceSourceScript(parent, className, name, source)
-	local old = parent:FindFirstChild(name)
-	if old then
-		old:Destroy()
-	end
-
-	local obj = Instance.new(className)
-	obj.Name = name
-
-	local ok, err = pcall(function()
-		obj.Source = source
-	end)
-
-	if not ok then
-		obj:Destroy()
-		error(
-			"Không thể ghi Source. Hãy chạy installer bằng Roblox Studio Command Bar ở Edit Mode. "
-			.. tostring(err)
-		)
-	end
-
-	obj.Parent = parent
-	return obj
-end
-
-replaceSourceScript(
-	ServerScriptService,
-	"Script",
-	"BusAdminServer",
-	serverSource
-)
-
-local oldGui = StarterGui:FindFirstChild("BusDevPanel")
-if oldGui then
-	oldGui:Destroy()
-end
-
-local screenGui = Instance.new("ScreenGui")
-screenGui.Name = "BusDevPanel"
-screenGui.ResetOnSpawn = false
-screenGui.IgnoreGuiInset = true
-screenGui.DisplayOrder = 999999
-screenGui.Enabled = true
-screenGui.Parent = StarterGui
-
-replaceSourceScript(
-	screenGui,
-	"LocalScript",
-	"BusAdminClient",
-	clientSource
-)
-
-print("==============================================")
-print("BUS DEV CONTROL v2 INSTALLED")
-print("Key: SEPDEPTRAI")
-print("UI: StarterGui/BusDevPanel")
-print("Server: ServerScriptService/BusAdminServer")
-print("STOP Play mode if active, then press Play again.")
-print("==============================================")
+print("[BusDevUI] UI created successfully:", gui:GetFullName())
