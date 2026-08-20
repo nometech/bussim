@@ -1,507 +1,597 @@
--- AXIOM DRIVING ASSIST UI V2
--- LocalScript -> StarterPlayer/StarterPlayerScripts
+--[[
+BUS DEV CONTROL - STUDIO INSTALLER v2
+=====================================
+Use only in a Roblox experience/place you own or are authorized to test.
+
+IMPORTANT:
+- Run this in Roblox Studio -> View -> Command Bar while NOT in Play mode.
+- After it prints "INSTALLED", press Play.
+- UI is installed under StarterGui so it appears immediately for LocalPlayer.
+- RightShift toggles the UI.
+- Master key: SEPDEPTRAI
+]]
+
+local ServerScriptService = game:GetService("ServerScriptService")
+local StarterGui = game:GetService("StarterGui")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local function ensureFolder(parent, name)
+	local obj = parent:FindFirstChild(name)
+	if obj and not obj:IsA("Folder") then
+		obj:Destroy()
+		obj = nil
+	end
+	if not obj then
+		obj = Instance.new("Folder")
+		obj.Name = name
+		obj.Parent = parent
+	end
+	return obj
+end
+
+local remoteFolder = ensureFolder(ReplicatedStorage, "BusAdminRemotes")
+
+for _, name in ipairs({"Auth", "SetSpeed", "SetNoClip", "Status"}) do
+	local obj = remoteFolder:FindFirstChild(name)
+	if obj and not obj:IsA("RemoteEvent") then
+		obj:Destroy()
+		obj = nil
+	end
+	if not obj then
+		local remote = Instance.new("RemoteEvent")
+		remote.Name = name
+		remote.Parent = remoteFolder
+	end
+end
+
+local serverSource = [==[
+--!strict
 
 local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local UIS = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local PhysicsService = game:GetService("PhysicsService")
 
-local player = Players.LocalPlayer
-local pg = player:WaitForChild("PlayerGui")
+local remotes = ReplicatedStorage:WaitForChild("BusAdminRemotes")
+local AuthRemote = remotes:WaitForChild("Auth") :: RemoteEvent
+local SpeedRemote = remotes:WaitForChild("SetSpeed") :: RemoteEvent
+local NoClipRemote = remotes:WaitForChild("SetNoClip") :: RemoteEvent
+local StatusRemote = remotes:WaitForChild("Status") :: RemoteEvent
 
-local CFG = {
-	NormalSpeed = 65,
-	SpeedLimit = 50,
-	CruiseMinSpeed = 10,
-	WarnDistance = 45,
-	BrakeDistance = 20,
-	RaycastHeight = 2.5,
-	SteerAssist = 0.12,
-	ToggleKey = Enum.KeyCode.RightShift,
-}
+local MASTER_KEY = "SEPDEPTRAI"
+local MIN_SPEED = 60
+local MAX_SPEED = 300
+local NOCLIP_GROUP = "BusAdminNoClip"
 
-local F = {
-	Limiter = true,
-	Cruise = false,
-	AutoBrake = true,
-	Warning = true,
-	SteerAssist = false,
-	Park = false,
-}
+local authorized: {[Player]: boolean} = {}
 
-local seat, vehicle
-local cruiseSpeed = 0
-local obstacle = math.huge
+pcall(function()
+	PhysicsService:RegisterCollisionGroup(NOCLIP_GROUP)
+end)
 
-local function getSeat()
-	local c = player.Character
-	local h = c and c:FindFirstChildOfClass("Humanoid")
-	local s = h and h.SeatPart
-	return s and s:IsA("VehicleSeat") and s or nil
+PhysicsService:CollisionGroupSetCollidable(NOCLIP_GROUP, "Default", false)
+
+local function send(player: Player, ok: boolean, message: string, code: string?)
+	StatusRemote:FireClient(player, {
+		ok = ok,
+		message = message,
+		code = code,
+	})
 end
 
-local function getVehicle(s)
-	if not s then return nil end
-	local p = s
-	while p and p ~= workspace do
-		if p:IsA("Model") and p:FindFirstChildWhichIsA("VehicleSeat", true) == s then
-			return p
+local function getSeat(player: Player): VehicleSeat?
+	local char = player.Character
+	if not char then return nil end
+
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not hum then return nil end
+
+	local seat = hum.SeatPart
+	if seat and seat:IsA("VehicleSeat") then
+		return seat
+	end
+
+	return nil
+end
+
+local function getVehicle(seat: BasePart): Model?
+	local node: Instance? = seat
+	while node do
+		if node:IsA("Model") then
+			return node
 		end
-		p = p.Parent
+		node = node.Parent
 	end
-	return s.Parent
+	return nil
 end
 
-local function speed()
-	return seat and seat.AssemblyLinearVelocity.Magnitude or 0
-end
+local function eachPart(root: Instance, fn: (BasePart) -> ())
+	if root:IsA("BasePart") then
+		fn(root)
+	end
 
-local function kmh(v)
-	return math.floor(v * 1.008 + 0.5)
-end
-
-local function park(on)
-	if not seat then return end
-	F.Park = on
-	if on then
-		F.Cruise = false
-		cruiseSpeed = 0
-		seat.MaxSpeed = 0
-		if speed() < 4 then
-			seat.AssemblyLinearVelocity = Vector3.zero
-			seat.AssemblyAngularVelocity = Vector3.zero
+	for _, obj in ipairs(root:GetDescendants()) do
+		if obj:IsA("BasePart") then
+			fn(obj)
 		end
-	else
-		seat.MaxSpeed = CFG.NormalSpeed
 	end
 end
 
-local function cruise()
-	if not seat or F.Park then return end
-	if F.Cruise then
-		F.Cruise = false
-		cruiseSpeed = 0
-		return
-	end
-	local v = speed()
-	if v >= CFG.CruiseMinSpeed then
-		F.Cruise = true
-		cruiseSpeed = v
-	end
-end
-
-local rp = RaycastParams.new()
-rp.FilterType = Enum.RaycastFilterType.Exclude
-
-local function scan()
-	if not seat then obstacle = math.huge return end
-	local ignore = {}
-	if vehicle then table.insert(ignore, vehicle) end
-	if player.Character then table.insert(ignore, player.Character) end
-	rp.FilterDescendantsInstances = ignore
-
-	local origin = seat.Position + Vector3.new(0, CFG.RaycastHeight, 0)
-	local hit = workspace:Raycast(origin, seat.CFrame.LookVector * CFG.WarnDistance, rp)
-	obstacle = hit and (hit.Position - origin).Magnitude or math.huge
-end
-
-local function autoBrake()
-	if not seat or not F.AutoBrake or F.Park or obstacle > CFG.BrakeDistance then return end
-	if speed() <= 1 then return end
-	F.Cruise = false
-	cruiseSpeed = 0
-	local factor = math.clamp(obstacle / CFG.BrakeDistance, 0.15, 1)
-	seat.AssemblyLinearVelocity *= (0.72 + factor * 0.18)
-end
-
-local function steerAssist()
-	if not seat or not F.SteerAssist or speed() < 5 then return end
-	if math.abs(seat.SteerFloat) < 0.1 then
-		local a = seat.AssemblyAngularVelocity
-		seat.AssemblyAngularVelocity = Vector3.new(a.X, a.Y * (1 - CFG.SteerAssist), a.Z)
-	end
-end
-
--- UI
-local old = pg:FindFirstChild("AxiomDriveV2")
-if old then old:Destroy() end
-
-local gui = Instance.new("ScreenGui")
-gui.Name = "AxiomDriveV2"
-gui.ResetOnSpawn = false
-gui.DisplayOrder = 9999
-gui.Parent = pg
-
-local main = Instance.new("Frame")
-main.AnchorPoint = Vector2.new(0, .5)
-main.Position = UDim2.new(0, 18, .5, 0)
-main.Size = UDim2.fromOffset(390, 520)
-main.BackgroundColor3 = Color3.fromRGB(13,15,20)
-main.BorderSizePixel = 0
-main.Parent = gui
-Instance.new("UICorner", main).CornerRadius = UDim.new(0,18)
-
-local stroke = Instance.new("UIStroke", main)
-stroke.Color = Color3.fromRGB(68,78,94)
-stroke.Transparency = .3
-
-local header = Instance.new("Frame")
-header.Size = UDim2.new(1,0,0,64)
-header.BackgroundTransparency = 1
-header.Active = true
-header.Parent = main
-
-local title = Instance.new("TextLabel")
-title.Position = UDim2.fromOffset(18,10)
-title.Size = UDim2.new(1,-80,0,25)
-title.BackgroundTransparency = 1
-title.Text = "AXIOM DRIVING ASSIST"
-title.Font = Enum.Font.GothamBold
-title.TextSize = 17
-title.TextColor3 = Color3.new(1,1,1)
-title.TextXAlignment = Enum.TextXAlignment.Left
-title.Parent = header
-
-local sub = Instance.new("TextLabel")
-sub.Position = UDim2.fromOffset(18,35)
-sub.Size = UDim2.new(1,-80,0,16)
-sub.BackgroundTransparency = 1
-sub.Text = "SYSTEM • ONLINE"
-sub.Font = Enum.Font.GothamMedium
-sub.TextSize = 11
-sub.TextColor3 = Color3.fromRGB(85,235,140)
-sub.TextXAlignment = Enum.TextXAlignment.Left
-sub.Parent = header
-
-local min = Instance.new("TextButton")
-min.Position = UDim2.new(1,-50,0,13)
-min.Size = UDim2.fromOffset(34,34)
-min.BackgroundColor3 = Color3.fromRGB(29,33,42)
-min.Text = "—"
-min.TextColor3 = Color3.new(1,1,1)
-min.Font = Enum.Font.GothamBold
-min.TextSize = 18
-min.BorderSizePixel = 0
-min.Parent = header
-Instance.new("UICorner", min).CornerRadius = UDim.new(0,9)
-
-local tabs = Instance.new("Frame")
-tabs.Position = UDim2.fromOffset(16,68)
-tabs.Size = UDim2.new(1,-32,0,42)
-tabs.BackgroundColor3 = Color3.fromRGB(20,23,30)
-tabs.BorderSizePixel = 0
-tabs.Parent = main
-Instance.new("UICorner", tabs).CornerRadius = UDim.new(0,11)
-
-local function tabButton(text, pos)
-	local b = Instance.new("TextButton")
-	b.Position = pos
-	b.Size = UDim2.new(.5,-6,1,-8)
-	b.BackgroundColor3 = Color3.fromRGB(28,31,40)
-	b.BorderSizePixel = 0
-	b.Text = text
-	b.TextColor3 = Color3.new(1,1,1)
-	b.Font = Enum.Font.GothamBold
-	b.TextSize = 12
-	b.Parent = tabs
-	Instance.new("UICorner", b).CornerRadius = UDim.new(0,8)
-	return b
-end
-
-local tabStatus = tabButton("TRẠNG THÁI", UDim2.fromOffset(4,4))
-local tabAssist = tabButton("HỖ TRỢ", UDim2.new(.5,2,0,4))
-
-local statusPage = Instance.new("Frame")
-statusPage.Position = UDim2.fromOffset(16,122)
-statusPage.Size = UDim2.new(1,-32,1,-140)
-statusPage.BackgroundTransparency = 1
-statusPage.Parent = main
-
-local assistPage = Instance.new("ScrollingFrame")
-assistPage.Position = statusPage.Position
-assistPage.Size = statusPage.Size
-assistPage.BackgroundTransparency = 1
-assistPage.BorderSizePixel = 0
-assistPage.ScrollBarThickness = 4
-assistPage.AutomaticCanvasSize = Enum.AutomaticSize.Y
-assistPage.CanvasSize = UDim2.new()
-assistPage.Visible = false
-assistPage.Parent = main
-local list = Instance.new("UIListLayout", assistPage)
-list.Padding = UDim.new(0,8)
-
--- Speed card
-local speedCard = Instance.new("Frame")
-speedCard.Size = UDim2.new(1,0,0,150)
-speedCard.BackgroundColor3 = Color3.fromRGB(20,23,30)
-speedCard.BorderSizePixel = 0
-speedCard.Parent = statusPage
-Instance.new("UICorner", speedCard).CornerRadius = UDim.new(0,14)
-
-local speedText = Instance.new("TextLabel")
-speedText.Position = UDim2.fromOffset(20,15)
-speedText.Size = UDim2.fromOffset(170,70)
-speedText.BackgroundTransparency = 1
-speedText.Text = "0"
-speedText.Font = Enum.Font.GothamBlack
-speedText.TextSize = 56
-speedText.TextColor3 = Color3.new(1,1,1)
-speedText.TextXAlignment = Enum.TextXAlignment.Left
-speedText.Parent = speedCard
-
-local unit = Instance.new("TextLabel")
-unit.Position = UDim2.fromOffset(24,82)
-unit.Size = UDim2.fromOffset(90,20)
-unit.BackgroundTransparency = 1
-unit.Text = "KM/H"
-unit.Font = Enum.Font.GothamMedium
-unit.TextSize = 13
-unit.TextColor3 = Color3.fromRGB(155,165,180)
-unit.TextXAlignment = Enum.TextXAlignment.Left
-unit.Parent = speedCard
-
-local gear = Instance.new("TextLabel")
-gear.Position = UDim2.new(1,-84,0,20)
-gear.Size = UDim2.fromOffset(60,60)
-gear.BackgroundColor3 = Color3.fromRGB(35,78,52)
-gear.Text = "D"
-gear.TextColor3 = Color3.new(1,1,1)
-gear.Font = Enum.Font.GothamBlack
-gear.TextSize = 28
-gear.BorderSizePixel = 0
-gear.Parent = speedCard
-Instance.new("UICorner", gear).CornerRadius = UDim.new(0,14)
-
-local busName = Instance.new("TextLabel")
-busName.Position = UDim2.fromOffset(20,112)
-busName.Size = UDim2.new(1,-40,0,20)
-busName.BackgroundTransparency = 1
-busName.Text = "BUS: WAITING"
-busName.Font = Enum.Font.GothamMedium
-busName.TextSize = 12
-busName.TextColor3 = Color3.fromRGB(185,195,210)
-busName.TextXAlignment = Enum.TextXAlignment.Left
-busName.Parent = speedCard
-
--- Warning card
-local warnCard = Instance.new("Frame")
-warnCard.Position = UDim2.fromOffset(0,164)
-warnCard.Size = UDim2.new(1,0,0,82)
-warnCard.BackgroundColor3 = Color3.fromRGB(22,25,32)
-warnCard.BorderSizePixel = 0
-warnCard.Parent = statusPage
-Instance.new("UICorner", warnCard).CornerRadius = UDim.new(0,14)
-
-local warnTitle = Instance.new("TextLabel")
-warnTitle.Position = UDim2.fromOffset(16,12)
-warnTitle.Size = UDim2.new(1,-32,0,22)
-warnTitle.BackgroundTransparency = 1
-warnTitle.Text = "PHÍA TRƯỚC AN TOÀN"
-warnTitle.Font = Enum.Font.GothamBold
-warnTitle.TextSize = 13
-warnTitle.TextColor3 = Color3.fromRGB(100,235,150)
-warnTitle.TextXAlignment = Enum.TextXAlignment.Left
-warnTitle.Parent = warnCard
-
-local warnInfo = Instance.new("TextLabel")
-warnInfo.Position = UDim2.fromOffset(16,40)
-warnInfo.Size = UDim2.new(1,-32,0,22)
-warnInfo.BackgroundTransparency = 1
-warnInfo.Text = "Khoảng cách vật cản: ---"
-warnInfo.Font = Enum.Font.Gotham
-warnInfo.TextSize = 12
-warnInfo.TextColor3 = Color3.fromRGB(185,195,210)
-warnInfo.TextXAlignment = Enum.TextXAlignment.Left
-warnInfo.Parent = warnCard
-
--- Info card
-local info = Instance.new("TextLabel")
-info.Position = UDim2.fromOffset(0,260)
-info.Size = UDim2.new(1,0,0,126)
-info.BackgroundColor3 = Color3.fromRGB(20,23,30)
-info.BorderSizePixel = 0
-info.Text = ""
-info.Font = Enum.Font.Code
-info.TextSize = 13
-info.TextColor3 = Color3.fromRGB(195,205,215)
-info.TextXAlignment = Enum.TextXAlignment.Left
-info.TextYAlignment = Enum.TextYAlignment.Top
-info.Parent = statusPage
-Instance.new("UICorner", info).CornerRadius = UDim.new(0,14)
-
-local btns = {}
-local function addToggle(label, key)
-	local b = Instance.new("TextButton")
-	b.Size = UDim2.new(1,-5,0,50)
-	b.BackgroundColor3 = Color3.fromRGB(28,31,40)
-	b.BorderSizePixel = 0
-	b.TextColor3 = Color3.new(1,1,1)
-	b.Font = Enum.Font.GothamMedium
-	b.TextSize = 13
-	b.Parent = assistPage
-	Instance.new("UICorner", b).CornerRadius = UDim.new(0,11)
-	btns[key] = {b=b,label=label}
-
-	b.MouseButton1Click:Connect(function()
-		if key == "Cruise" then cruise() else F[key] = not F[key] end
+local function setNoClip(vehicle: Model, enabled: boolean)
+	eachPart(vehicle, function(part)
+		if enabled then
+			if part:GetAttribute("BusAdminOriginalCollisionGroup") == nil then
+				part:SetAttribute("BusAdminOriginalCollisionGroup", part.CollisionGroup)
+			end
+			part.CollisionGroup = NOCLIP_GROUP
+		else
+			local original = part:GetAttribute("BusAdminOriginalCollisionGroup")
+			if typeof(original) == "string" and original ~= "" then
+				part.CollisionGroup = original
+			else
+				part.CollisionGroup = "Default"
+			end
+			part:SetAttribute("BusAdminOriginalCollisionGroup", nil)
+		end
 	end)
 end
 
-addToggle("Giới hạn tốc độ", "Limiter")
-addToggle("Giữ ga Cruise", "Cruise")
-addToggle("Tự động phanh", "AutoBrake")
-addToggle("Cảnh báo vật cản", "Warning")
-addToggle("Hỗ trợ giữ hướng", "SteerAssist")
-
-local parkBtn = Instance.new("TextButton")
-parkBtn.Size = UDim2.new(1,-5,0,54)
-parkBtn.BackgroundColor3 = Color3.fromRGB(60,47,30)
-parkBtn.BorderSizePixel = 0
-parkBtn.Text = "PARK / RELEASE P"
-parkBtn.TextColor3 = Color3.new(1,1,1)
-parkBtn.Font = Enum.Font.GothamBold
-parkBtn.TextSize = 14
-parkBtn.Parent = assistPage
-Instance.new("UICorner", parkBtn).CornerRadius = UDim.new(0,11)
-
-parkBtn.MouseButton1Click:Connect(function()
-	if not seat then return end
-	if F.Park then park(false) elseif speed() <= 3 then park(true) end
-end)
-
-local function refreshButtons()
-	for k,d in pairs(btns) do
-		local on = F[k]
-		d.b.Text = d.label .. "                         " .. (on and "ON" or "OFF")
-		d.b.BackgroundColor3 = on and Color3.fromRGB(35,78,52) or Color3.fromRGB(28,31,40)
-	end
-end
-
-local page = "status"
-local function switchPage(which)
-	page = which
-	statusPage.Visible = which == "status"
-	assistPage.Visible = which == "assist"
-	tabStatus.BackgroundColor3 = which == "status" and Color3.fromRGB(35,78,52) or Color3.fromRGB(28,31,40)
-	tabAssist.BackgroundColor3 = which == "assist" and Color3.fromRGB(35,78,52) or Color3.fromRGB(28,31,40)
-end
-tabStatus.MouseButton1Click:Connect(function() switchPage("status") end)
-tabAssist.MouseButton1Click:Connect(function() switchPage("assist") end)
-switchPage("status")
-
--- minimize
-local minimized = false
-min.MouseButton1Click:Connect(function()
-	minimized = not minimized
-	main.Size = minimized and UDim2.fromOffset(390,64) or UDim2.fromOffset(390,520)
-	tabs.Visible = not minimized
-	if minimized then statusPage.Visible=false assistPage.Visible=false else switchPage(page) end
-end)
-
--- drag
-local dragging, dragStart, startPos = false, nil, nil
-header.InputBegan:Connect(function(i)
-	if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-		dragging=true dragStart=i.Position startPos=main.Position
-	end
-end)
-UIS.InputChanged:Connect(function(i)
-	if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
-		local d=i.Position-dragStart
-		main.Position=UDim2.new(startPos.X.Scale,startPos.X.Offset+d.X,startPos.Y.Scale,startPos.Y.Offset+d.Y)
-	end
-end)
-UIS.InputEnded:Connect(function(i)
-	if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then dragging=false end
-end)
-
-UIS.InputBegan:Connect(function(i,p)
-	if p then return end
-	if i.KeyCode == CFG.ToggleKey then
-		gui.Enabled = not gui.Enabled
-	elseif i.KeyCode == Enum.KeyCode.P then
-		if seat then
-			if F.Park then park(false) elseif speed() <= 3 then park(true) end
-		end
-	elseif i.KeyCode == Enum.KeyCode.C then
-		cruise()
-	end
-end)
-
-RunService.RenderStepped:Connect(function(dt)
-	local s = getSeat()
-	if s ~= seat then
-		seat = s
-		vehicle = getVehicle(s)
-		F.Cruise = false
-		F.Park = false
-		cruiseSpeed = 0
-	end
-
-	if not seat then
-		speedText.Text = "0"
-		gear.Text = "-"
-		busName.Text = "BUS: WAITING"
-		warnTitle.Text = "CHƯA KẾT NỐI XE"
-		warnTitle.TextColor3 = Color3.fromRGB(180,190,205)
-		warnInfo.Text = "Ngồi vào VehicleSeat để kích hoạt."
-		info.Text = "\n  PARK       : OFF\n  CRUISE     : OFF\n  LIMITER    : "..(F.Limiter and "ON" or "OFF").."\n  AUTO BRAKE : "..(F.AutoBrake and "ON" or "OFF")
-		refreshButtons()
+AuthRemote.OnServerEvent:Connect(function(player, key)
+	if typeof(key) ~= "string" then
+		send(player, false, "Key không hợp lệ.", "AUTH_INVALID")
 		return
 	end
 
-	local v = speed()
-	scan()
-
-	if F.Park then
-		seat.MaxSpeed = 0
-		if v < 3 then seat.AssemblyLinearVelocity = Vector3.zero end
-	elseif F.Limiter then
-		seat.MaxSpeed = CFG.SpeedLimit
+	if key == MASTER_KEY then
+		authorized[player] = true
+		send(player, true, "Đã xác thực quyền DEV.", "AUTH_OK")
 	else
-		seat.MaxSpeed = CFG.NormalSpeed
+		authorized[player] = nil
+		send(player, false, "Sai key.", "AUTH_FAILED")
 	end
-
-	if F.Cruise and cruiseSpeed > 0 and not F.Park and v < cruiseSpeed then
-		local diff = cruiseSpeed - v
-		seat.AssemblyLinearVelocity += seat.CFrame.LookVector * diff * dt * 2
-	end
-
-	autoBrake()
-	steerAssist()
-
-	speedText.Text = tostring(kmh(v))
-	gear.Text = F.Park and "P" or "D"
-	gear.BackgroundColor3 = F.Park and Color3.fromRGB(115,45,45) or Color3.fromRGB(35,78,52)
-	busName.Text = "BUS: "..(vehicle and vehicle.Name or "VEHICLE")
-
-	if not F.Warning then
-		warnTitle.Text = "CẢNH BÁO ĐÃ TẮT"
-		warnTitle.TextColor3 = Color3.fromRGB(160,170,185)
-	elseif obstacle < CFG.BrakeDistance then
-		warnTitle.Text = "PHANH • VẬT CẢN RẤT GẦN"
-		warnTitle.TextColor3 = Color3.fromRGB(255,95,95)
-	elseif obstacle < CFG.WarnDistance then
-		warnTitle.Text = "CẢNH BÁO VẬT CẢN"
-		warnTitle.TextColor3 = Color3.fromRGB(255,195,90)
-	else
-		warnTitle.Text = "PHÍA TRƯỚC AN TOÀN"
-		warnTitle.TextColor3 = Color3.fromRGB(100,235,150)
-	end
-
-	warnInfo.Text = "Khoảng cách vật cản: "..(obstacle < math.huge and math.floor(obstacle).." studs" or "---")
-
-	info.Text =
-		"\n  PARK       : "..(F.Park and "ON" or "OFF")..
-		"\n  CRUISE     : "..(F.Cruise and kmh(cruiseSpeed).." KM/H" or "OFF")..
-		"\n  LIMITER    : "..(F.Limiter and "ON" or "OFF")..
-		"\n  AUTO BRAKE : "..(F.AutoBrake and "ON" or "OFF")
-
-	refreshButtons()
 end)
 
-player.CharacterAdded:Connect(function()
-	seat=nil vehicle=nil cruiseSpeed=0
+SpeedRemote.OnServerEvent:Connect(function(player, requestedSpeed)
+	if not authorized[player] then
+		send(player, false, "Chưa xác thực.", "NOT_AUTHORIZED")
+		return
+	end
+
+	if typeof(requestedSpeed) ~= "number" then
+		return
+	end
+
+	local seat = getSeat(player)
+	if not seat then
+		send(player, false, "Chưa ngồi VehicleSeat.", "NO_SEAT")
+		return
+	end
+
+	local speed = math.clamp(math.floor(requestedSpeed), MIN_SPEED, MAX_SPEED)
+
+	seat.MaxSpeed = speed
+	seat:SetAttribute("DevMaxSpeed", speed)
+
+	local vehicle = getVehicle(seat)
+	if vehicle then
+		vehicle:SetAttribute("DevMaxSpeed", speed)
+	end
+
+	send(player, true, ("Tốc độ: %d"):format(speed), "SPEED_OK")
 end)
 
-refreshButtons()
-print("[AXIOM DRIVING ASSIST UI V2] ONLINE")
+NoClipRemote.OnServerEvent:Connect(function(player, enabled)
+	if not authorized[player] then
+		send(player, false, "Chưa xác thực.", "NOT_AUTHORIZED")
+		return
+	end
+
+	if typeof(enabled) ~= "boolean" then
+		return
+	end
+
+	local seat = getSeat(player)
+	if not seat then
+		send(player, false, "Chưa ngồi VehicleSeat.", "NO_SEAT")
+		return
+	end
+
+	local vehicle = getVehicle(seat)
+	if not vehicle then
+		send(player, false, "Không tìm thấy model xe.", "NO_MODEL")
+		return
+	end
+
+	setNoClip(vehicle, enabled)
+
+	send(
+		player,
+		true,
+		enabled and "No-clip xe: ON" or "No-clip xe: OFF",
+		enabled and "NOCLIP_ON" or "NOCLIP_OFF"
+	)
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	authorized[player] = nil
+end)
+
+print("[BusAdmin] Server ready")
+]==]
+
+local clientSource = [==[
+--!strict
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+
+local player = Players.LocalPlayer
+local gui = script.Parent
+
+assert(gui:IsA("ScreenGui"), "BusAdmin client must be inside ScreenGui")
+
+gui.Enabled = true
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.DisplayOrder = 999999
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+local old = gui:FindFirstChild("Main")
+if old then
+	old:Destroy()
+end
+
+local main = Instance.new("Frame")
+main.Name = "Main"
+main.Size = UDim2.fromOffset(400, 440)
+main.Position = UDim2.new(0, 24, 0.5, -220)
+main.BackgroundColor3 = Color3.fromRGB(15, 17, 23)
+main.BorderSizePixel = 0
+main.ZIndex = 10
+main.Parent = gui
+
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 18)
+
+local stroke = Instance.new("UIStroke")
+stroke.Color = Color3.fromRGB(75, 84, 115)
+stroke.Transparency = 0.25
+stroke.Thickness = 1
+stroke.Parent = main
+
+local function label(text, pos, size, font, textSize, color)
+	local o = Instance.new("TextLabel")
+	o.BackgroundTransparency = 1
+	o.Text = text
+	o.Position = pos
+	o.Size = size
+	o.Font = font or Enum.Font.Gotham
+	o.TextSize = textSize or 14
+	o.TextColor3 = color or Color3.new(1,1,1)
+	o.TextXAlignment = Enum.TextXAlignment.Left
+	o.ZIndex = 11
+	o.Parent = main
+	return o
+end
+
+local function button(text, pos, size)
+	local o = Instance.new("TextButton")
+	o.Text = text
+	o.Position = pos
+	o.Size = size
+	o.BackgroundColor3 = Color3.fromRGB(36, 40, 54)
+	o.TextColor3 = Color3.fromRGB(245,245,250)
+	o.Font = Enum.Font.GothamBold
+	o.TextSize = 14
+	o.AutoButtonColor = false
+	o.ZIndex = 11
+	o.Parent = main
+	Instance.new("UICorner", o).CornerRadius = UDim.new(0, 11)
+	return o
+end
+
+local title = label(
+	"BUS DEV CONTROL",
+	UDim2.fromOffset(20, 14),
+	UDim2.new(1, -80, 0, 32),
+	Enum.Font.GothamBold,
+	21,
+	Color3.fromRGB(245,247,255)
+)
+title.Active = true
+
+label(
+	"Studio / private QA panel",
+	UDim2.fromOffset(20, 46),
+	UDim2.new(1, -40, 0, 22),
+	Enum.Font.Gotham,
+	12,
+	Color3.fromRGB(135,140,160)
+)
+
+local close = button("×", UDim2.new(1,-58,0,14), UDim2.fromOffset(38,38))
+close.TextSize = 24
+
+local keyBox = Instance.new("TextBox")
+keyBox.Position = UDim2.fromOffset(20, 88)
+keyBox.Size = UDim2.new(1, -40, 0, 48)
+keyBox.BackgroundColor3 = Color3.fromRGB(24,27,36)
+keyBox.TextColor3 = Color3.fromRGB(245,245,250)
+keyBox.PlaceholderText = "Nhập key..."
+keyBox.PlaceholderColor3 = Color3.fromRGB(105,110,125)
+keyBox.Text = ""
+keyBox.ClearTextOnFocus = false
+keyBox.Font = Enum.Font.GothamMedium
+keyBox.TextSize = 15
+keyBox.ZIndex = 11
+keyBox.Parent = main
+Instance.new("UICorner", keyBox).CornerRadius = UDim.new(0,11)
+
+local pad = Instance.new("UIPadding")
+pad.PaddingLeft = UDim.new(0,14)
+pad.PaddingRight = UDim.new(0,14)
+pad.Parent = keyBox
+
+local authButton = button(
+	"XÁC THỰC",
+	UDim2.fromOffset(20, 146),
+	UDim2.new(1,-40,0,44)
+)
+authButton.BackgroundColor3 = Color3.fromRGB(68,88,255)
+
+local speed = 120
+local speedLabel = label(
+	"Tốc độ: 120",
+	UDim2.fromOffset(20, 215),
+	UDim2.new(1,-40,0,24),
+	Enum.Font.GothamMedium,
+	15,
+	Color3.fromRGB(235,237,248)
+)
+
+local minus = button("-", UDim2.fromOffset(20,250), UDim2.fromOffset(72,42))
+minus.TextSize = 22
+
+local apply = button("ÁP DỤNG", UDim2.fromOffset(104,250), UDim2.new(1,-208,0,42))
+
+local plus = button("+", UDim2.new(1,-92,0,250), UDim2.fromOffset(72,42))
+plus.TextSize = 22
+
+local noclip = button(
+	"NO-CLIP XE: OFF",
+	UDim2.fromOffset(20,312),
+	UDim2.new(1,-40,0,48)
+)
+
+local status = label(
+	"UI đã tải. Chưa xác thực.",
+	UDim2.fromOffset(20,378),
+	UDim2.new(1,-40,0,24),
+	Enum.Font.Gotham,
+	13,
+	Color3.fromRGB(160,165,185)
+)
+
+label(
+	"RightShift: Ẩn / hiện UI",
+	UDim2.fromOffset(20,409),
+	UDim2.new(1,-40,0,18),
+	Enum.Font.Gotham,
+	11,
+	Color3.fromRGB(95,100,118)
+)
+
+local authenticated = false
+local noclipEnabled = false
+
+local remotes = ReplicatedStorage:FindFirstChild("BusAdminRemotes")
+
+if not remotes then
+	status.Text = "Lỗi: không tìm thấy BusAdminRemotes."
+	status.TextColor3 = Color3.fromRGB(255,100,100)
+	return
+end
+
+local AuthRemote = remotes:WaitForChild("Auth", 5)
+local SpeedRemote = remotes:WaitForChild("SetSpeed", 5)
+local NoClipRemote = remotes:WaitForChild("SetNoClip", 5)
+local StatusRemote = remotes:WaitForChild("Status", 5)
+
+if not (AuthRemote and SpeedRemote and NoClipRemote and StatusRemote) then
+	status.Text = "Lỗi: thiếu RemoteEvent."
+	status.TextColor3 = Color3.fromRGB(255,100,100)
+	return
+end
+
+local function setButtonColor(btn, color)
+	TweenService:Create(
+		btn,
+		TweenInfo.new(0.15, Enum.EasingStyle.Quad),
+		{BackgroundColor3 = color}
+	):Play()
+end
+
+authButton.MouseButton1Click:Connect(function()
+	if keyBox.Text == "" then
+		status.Text = "Nhập key trước."
+		return
+	end
+	status.Text = "Đang xác thực..."
+	AuthRemote:FireServer(keyBox.Text)
+end)
+
+keyBox.FocusLost:Connect(function(enterPressed)
+	if enterPressed then
+		authButton:Activate()
+	end
+end)
+
+minus.MouseButton1Click:Connect(function()
+	speed = math.max(60, speed - 20)
+	speedLabel.Text = "Tốc độ: " .. speed
+end)
+
+plus.MouseButton1Click:Connect(function()
+	speed = math.min(300, speed + 20)
+	speedLabel.Text = "Tốc độ: " .. speed
+end)
+
+apply.MouseButton1Click:Connect(function()
+	if not authenticated then
+		status.Text = "Chưa xác thực."
+		return
+	end
+	SpeedRemote:FireServer(speed)
+end)
+
+noclip.MouseButton1Click:Connect(function()
+	if not authenticated then
+		status.Text = "Chưa xác thực."
+		return
+	end
+
+	noclipEnabled = not noclipEnabled
+	noclip.Text = noclipEnabled and "NO-CLIP XE: ON" or "NO-CLIP XE: OFF"
+	setButtonColor(
+		noclip,
+		noclipEnabled and Color3.fromRGB(42,145,84) or Color3.fromRGB(36,40,54)
+	)
+
+	NoClipRemote:FireServer(noclipEnabled)
+end)
+
+close.MouseButton1Click:Connect(function()
+	gui.Enabled = false
+end)
+
+StatusRemote.OnClientEvent:Connect(function(data)
+	if typeof(data) ~= "table" then
+		return
+	end
+
+	status.Text = tostring(data.message or "")
+
+	if data.code == "AUTH_OK" then
+		authenticated = true
+		authButton.Text = "ĐÃ XÁC THỰC"
+		keyBox.Text = ""
+		setButtonColor(authButton, Color3.fromRGB(42,145,84))
+	elseif data.code == "AUTH_FAILED" then
+		authenticated = false
+		authButton.Text = "XÁC THỰC"
+		setButtonColor(authButton, Color3.fromRGB(180,55,65))
+	end
+end)
+
+-- Dragging
+local dragging = false
+local dragStart: Vector2? = nil
+local startPos: UDim2? = nil
+
+title.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+		dragging = true
+		dragStart = input.Position
+		startPos = main.Position
+	end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+	if not dragging or not dragStart or not startPos then
+		return
+	end
+
+	if input.UserInputType ~= Enum.UserInputType.MouseMovement
+		and input.UserInputType ~= Enum.UserInputType.Touch then
+		return
+	end
+
+	local delta = input.Position - dragStart
+	main.Position = UDim2.new(
+		startPos.X.Scale,
+		startPos.X.Offset + delta.X,
+		startPos.Y.Scale,
+		startPos.Y.Offset + delta.Y
+	)
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+		dragging = false
+	end
+end)
+
+UserInputService.InputBegan:Connect(function(input, processed)
+	if processed then
+		return
+	end
+
+	if input.KeyCode == Enum.KeyCode.RightShift then
+		gui.Enabled = not gui.Enabled
+	end
+end)
+
+print("[BusAdmin] UI loaded for", player.Name)
+]==]
+
+local function replaceSourceScript(parent, className, name, source)
+	local old = parent:FindFirstChild(name)
+	if old then
+		old:Destroy()
+	end
+
+	local obj = Instance.new(className)
+	obj.Name = name
+
+	local ok, err = pcall(function()
+		obj.Source = source
+	end)
+
+	if not ok then
+		obj:Destroy()
+		error(
+			"Không thể ghi Source. Hãy chạy installer bằng Roblox Studio Command Bar ở Edit Mode. "
+			.. tostring(err)
+		)
+	end
+
+	obj.Parent = parent
+	return obj
+end
+
+replaceSourceScript(
+	ServerScriptService,
+	"Script",
+	"BusAdminServer",
+	serverSource
+)
+
+local oldGui = StarterGui:FindFirstChild("BusDevPanel")
+if oldGui then
+	oldGui:Destroy()
+end
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "BusDevPanel"
+screenGui.ResetOnSpawn = false
+screenGui.IgnoreGuiInset = true
+screenGui.DisplayOrder = 999999
+screenGui.Enabled = true
+screenGui.Parent = StarterGui
+
+replaceSourceScript(
+	screenGui,
+	"LocalScript",
+	"BusAdminClient",
+	clientSource
+)
+
+print("==============================================")
+print("BUS DEV CONTROL v2 INSTALLED")
+print("Key: SEPDEPTRAI")
+print("UI: StarterGui/BusDevPanel")
+print("Server: ServerScriptService/BusAdminServer")
+print("STOP Play mode if active, then press Play again.")
+print("==============================================")
